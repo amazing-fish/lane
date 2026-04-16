@@ -59,10 +59,11 @@ class AttentionMIL(nn.Module):
         self.attn_U = nn.Sequential(nn.Linear(feature_dim, hidden_dim), nn.Sigmoid())
         self.attn_w = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         """
         Args:
             x: (B, N, D) - N 个 snippet 特征
+            mask: (B, N) - True 表示有效 snippet，False 表示 padding
         Returns:
             aggregated: (B, D)
             attn_weights: (B, N) - 注意力权重（可用于证据定位）
@@ -70,7 +71,21 @@ class AttentionMIL(nn.Module):
         v = self.attn_V(x)   # (B, N, H)
         u = self.attn_U(x)   # (B, N, H)
         scores = self.attn_w(v * u)  # (B, N, 1)
-        attn_weights = torch.softmax(scores, dim=1)  # (B, N, 1)
+
+        if mask is None:
+            attn_weights = torch.softmax(scores, dim=1)  # (B, N, 1)
+        else:
+            if mask.dim() != 2 or mask.shape != x.shape[:2]:
+                raise ValueError(f"mask shape must be (B, N) = {x.shape[:2]}, got {tuple(mask.shape)}")
+            mask = mask.to(dtype=torch.bool, device=x.device).unsqueeze(-1)  # (B, N, 1)
+
+            # 屏蔽 padding snippet；随后再乘 mask + 重归一化，确保全无效时不会出现 NaN
+            scores = scores.masked_fill(~mask, -1e9)
+            attn_weights = torch.softmax(scores, dim=1)
+            attn_weights = attn_weights * mask
+            denom = attn_weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            attn_weights = attn_weights / denom
+
         aggregated = (x * attn_weights).sum(dim=1)    # (B, D)
         return aggregated, attn_weights.squeeze(-1)
 
@@ -98,14 +113,19 @@ class LaneMVPModel(nn.Module):
         self.direction_head = nn.Linear(mcfg["feature_dim"], mcfg["num_direction_classes"])
         self.lane_count_head = nn.Linear(mcfg["feature_dim"], mcfg["num_lane_classes"])
 
-    def forward(self, snippets):
+    def forward(self, snippets, masks=None):
         """
         Args:
             snippets: (B, N, T, C, H, W) - B个clip, 每个N个snippet, 每个T帧
+            masks: (B, N) - True 表示有效 snippet，False 表示 padding
         Returns:
             dict with direction_logits, lane_count_logits, attention_weights
         """
         B, N, T, C, H, W = snippets.shape
+        if masks is None:
+            masks = torch.ones((B, N), dtype=torch.bool, device=snippets.device)
+        else:
+            masks = masks.to(device=snippets.device, dtype=torch.bool)
 
         # 编码每个 snippet
         snippets_flat = snippets.view(B * N, T, C, H, W)
@@ -113,7 +133,7 @@ class LaneMVPModel(nn.Module):
         snippet_feats = snippet_feats.view(B, N, -1)         # (B, N, D)
 
         # MIL 聚合
-        clip_feat, attn_weights = self.attention_mil(snippet_feats)  # (B, D), (B, N)
+        clip_feat, attn_weights = self.attention_mil(snippet_feats, masks)  # (B, D), (B, N)
         clip_feat = self.dropout(clip_feat)
 
         # 双头输出

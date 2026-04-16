@@ -76,9 +76,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion_dir, criterio
 
     for batch in loader:
         snippets = batch["snippets"].to(device)
+        masks = batch["masks"].to(device)
         dir_lbl = batch["direction_label"].to(device)
         lane_lbl = batch["lane_count_label"].to(device)
-        out = model(snippets)
+        out = model(snippets, masks)
 
         loss, has_valid, dp, dl, lp, ll = compute_loss_and_preds(
             out, dir_lbl, lane_lbl, criterion_dir, criterion_lane, tcfg)
@@ -110,9 +111,10 @@ def validate(model, loader, criterion_dir, criterion_lane, cfg, device):
 
     for batch in loader:
         snippets = batch["snippets"].to(device)
+        masks = batch["masks"].to(device)
         dir_lbl = batch["direction_label"].to(device)
         lane_lbl = batch["lane_count_label"].to(device)
-        out = model(snippets)
+        out = model(snippets, masks)
 
         loss, _, dp, dl, lp, ll = compute_loss_and_preds(
             out, dir_lbl, lane_lbl, criterion_dir, criterion_lane, tcfg)
