@@ -13,3 +13,5 @@ matplotlib>=3.7.0
 # bag 解码 (按实际 bag 格式选装)
 # rosbag>=1.16.0        # ROS1 bag
 # rosbags>=0.9.0        # ROS2 bag
+
+Flask>=3.0.0
