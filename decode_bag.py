@@ -10,7 +10,10 @@ decode_bag.py - 从前视 camera bag 包解码图像帧与时间戳索引
 import argparse
 import csv
 import os
+import shutil
+import subprocess
 import sys
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -68,52 +71,178 @@ def find_front_topic(available_topics, candidate_topics):
         for topic in available_topics:
             if candidate in topic:
                 return topic
-    # 回退：找包含 front 和 image 的 topic
+    # 回退：找常见前视/相机/视频 topic（例如 /cam_1）
     for topic in available_topics:
         t = topic.lower()
-        if "front" in t and ("image" in t or "camera" in t):
+        if any(k in t for k in ("front", "camera", "cam", "video", "image")):
             return topic
     return None
 
 
 def decode_image_msg(msg, msg_type=None):
     """从 ROS 消息解码图像，支持 raw 和 compressed."""
-    if msg_type and "Compressed" in msg_type:
-        buf = np.frombuffer(msg.data, dtype=np.uint8)
+    try:
+        if msg_type and "Compressed" in msg_type:
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            return img
+        # sensor_msgs/Image raw
+        if hasattr(msg, "encoding") and hasattr(msg, "data"):
+            encoding = msg.encoding
+            h, w = msg.height, msg.width
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            if encoding in ("rgb8", "bgr8"):
+                img = buf.reshape(h, w, 3)
+                if encoding == "rgb8":
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                return img
+            elif encoding in ("mono8",):
+                return buf.reshape(h, w)
+            elif encoding in ("bayer_rggb8", "bayer_gbrg8", "bayer_grbg8", "bayer_bggr8"):
+                code_map = {
+                    "bayer_rggb8": cv2.COLOR_BayerBG2BGR,
+                    "bayer_gbrg8": cv2.COLOR_BayerGR2BGR,
+                    "bayer_grbg8": cv2.COLOR_BayerGB2BGR,
+                    "bayer_bggr8": cv2.COLOR_BayerRG2BGR,
+                }
+                img = buf.reshape(h, w)
+                return cv2.cvtColor(img, code_map.get(encoding, cv2.COLOR_BayerBG2BGR))
+        # 尝试当 compressed 处理
+        raw = msg.data if hasattr(msg, "data") else msg
+        if not isinstance(raw, (bytes, bytearray, memoryview, np.ndarray, list, tuple)):
+            return None
+        buf = np.frombuffer(bytes(raw), dtype=np.uint8)
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         return img
-    # sensor_msgs/Image raw
-    if hasattr(msg, "encoding") and hasattr(msg, "data"):
-        encoding = msg.encoding
-        h, w = msg.height, msg.width
-        buf = np.frombuffer(msg.data, dtype=np.uint8)
-        if encoding in ("rgb8", "bgr8"):
-            img = buf.reshape(h, w, 3)
-            if encoding == "rgb8":
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
+
+
+def _to_bytes(data):
+    """将消息字段统一转换为 bytes."""
+    if data is None:
+        return None
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return bytes(data)
+    if isinstance(data, np.ndarray):
+        return data.astype(np.uint8).tobytes()
+    if isinstance(data, (list, tuple)):
+        try:
+            return bytes(data)
+        except ValueError:
+            return None
+    return None
+
+
+def extract_packet_payload(msg):
+    """从可能的视频包消息中提取 payload bytes."""
+    for field in ("raw_data", "payload", "data"):
+        if hasattr(msg, field):
+            payload = _to_bytes(getattr(msg, field))
+            if payload:
+                return payload
+    return None
+
+
+class H265PacketDecoder:
+    """基于 ffmpeg 的 H.265 包解码器（单包 + 上下文拼接回退）."""
+
+    def __init__(self, context_packets=24):
+        self.context_packets = max(1, int(context_packets))
+        self.packet_buffer = deque(maxlen=self.context_packets)
+        self.ffmpeg_available = shutil.which("ffmpeg") is not None
+
+    @staticmethod
+    def _looks_like_annexb(packet_bytes):
+        return (
+            len(packet_bytes) > 4
+            and packet_bytes[0] == 0x00
+            and packet_bytes[1] == 0x00
+            and packet_bytes[2] in (0x00, 0x01)
+        )
+
+    def _decode_stream(self, stream_bytes):
+        if not self.ffmpeg_available or not stream_bytes:
+            return None
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "hevc",
+            "-i",
+            "pipe:0",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=stream_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except Exception:
+            return None
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        arr = np.frombuffer(proc.stdout, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+    def decode_packet(self, packet_bytes):
+        if not packet_bytes:
+            return None
+        self.packet_buffer.append(packet_bytes)
+        img = self._decode_stream(packet_bytes)
+        if img is not None:
             return img
-        elif encoding in ("mono8",):
-            return buf.reshape(h, w)
-        elif encoding in ("bayer_rggb8", "bayer_gbrg8", "bayer_grbg8", "bayer_bggr8"):
-            code_map = {
-                "bayer_rggb8": cv2.COLOR_BayerBG2BGR,
-                "bayer_gbrg8": cv2.COLOR_BayerGR2BGR,
-                "bayer_grbg8": cv2.COLOR_BayerGB2BGR,
-                "bayer_bggr8": cv2.COLOR_BayerRG2BGR,
-            }
-            img = buf.reshape(h, w)
-            return cv2.cvtColor(img, code_map.get(encoding, cv2.COLOR_BayerBG2BGR))
-    # 尝试当 compressed 处理
-    buf = np.frombuffer(msg.data if hasattr(msg, "data") else msg, dtype=np.uint8)
-    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    return img
+        merged = b"".join(self.packet_buffer)
+        return self._decode_stream(merged)
+
+
+def maybe_decode_packet_message(msg, msg_type, packet_decoder):
+    """尝试解码视频包消息，返回图像或 None."""
+    payload = extract_packet_payload(msg)
+    if not payload:
+        return None
+
+    video_format = str(getattr(msg, "video_format", "")).lower()
+    msg_type_l = (msg_type or "").lower()
+    has_raw_image_meta = all(hasattr(msg, k) for k in ("encoding", "height", "width"))
+    is_h265_declared = any(k in video_format for k in ("h265", "hevc")) or any(
+        k in msg_type_l for k in ("h265", "hevc")
+    )
+
+    # 原生 raw image 不走 packet 解码；标准 compressed 路径优先由 decode_image_msg 处理
+    if has_raw_image_meta:
+        return None
+    if not is_h265_declared and not hasattr(msg, "raw_data"):
+        # 非明确 H.265 消息，仅在 payload 看起来像 AnnexB 时再尝试
+        if not packet_decoder._looks_like_annexb(payload):
+            return None
+    return packet_decoder.decode_packet(payload)
 
 
 # ---------------------------------------------------------------------------
 # ROS1 解码
 # ---------------------------------------------------------------------------
 
-def decode_bag_ros1(bag_path, topic, output_dir, fmt="jpg", quality=95, max_frames=None):
+def decode_bag_ros1(
+    bag_path,
+    topic,
+    output_dir,
+    fmt="jpg",
+    quality=95,
+    max_frames=None,
+    h265_context_packets=24,
+):
     """从 ROS1 bag 导出图像帧."""
     rosbag = _try_import_rosbag()
     if rosbag is None:
@@ -126,12 +255,19 @@ def decode_bag_ros1(bag_path, topic, output_dir, fmt="jpg", quality=95, max_fram
     os.makedirs(output_dir, exist_ok=True)
     index_rows = []
     frame_idx = 0
+    packet_decoder = H265PacketDecoder(context_packets=h265_context_packets)
+    warned_ffmpeg = False
 
     for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
                           total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
         if max_frames and frame_idx >= max_frames:
             break
-        img = decode_image_msg(msg, topic)
+        img = decode_image_msg(msg)
+        if img is None:
+            img = maybe_decode_packet_message(msg, None, packet_decoder)
+            if img is None and extract_packet_payload(msg) and not packet_decoder.ffmpeg_available and not warned_ffmpeg:
+                print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
+                warned_ffmpeg = True
         if img is None:
             continue
         ts = t.to_sec() if hasattr(t, "to_sec") else float(t)
@@ -152,7 +288,15 @@ def decode_bag_ros1(bag_path, topic, output_dir, fmt="jpg", quality=95, max_fram
 # ROS2 解码
 # ---------------------------------------------------------------------------
 
-def decode_bag_ros2(bag_path, topic, output_dir, fmt="jpg", quality=95, max_frames=None):
+def decode_bag_ros2(
+    bag_path,
+    topic,
+    output_dir,
+    fmt="jpg",
+    quality=95,
+    max_frames=None,
+    h265_context_packets=24,
+):
     """从 ROS2 bag 导出图像帧."""
     Ros2Reader, deserialize_cdr = _try_import_rosbags()
     if Ros2Reader is None:
@@ -161,6 +305,8 @@ def decode_bag_ros2(bag_path, topic, output_dir, fmt="jpg", quality=95, max_fram
     os.makedirs(output_dir, exist_ok=True)
     index_rows = []
     frame_idx = 0
+    packet_decoder = H265PacketDecoder(context_packets=h265_context_packets)
+    warned_ffmpeg = False
 
     with Ros2Reader(bag_path) as reader:
         connections = [c for c in reader.connections if c.topic == topic]
@@ -173,6 +319,11 @@ def decode_bag_ros2(bag_path, topic, output_dir, fmt="jpg", quality=95, max_fram
                 break
             msg = deserialize_cdr(rawdata, conn.msgtype)
             img = decode_image_msg(msg, conn.msgtype)
+            if img is None:
+                img = maybe_decode_packet_message(msg, conn.msgtype, packet_decoder)
+                if img is None and extract_packet_payload(msg) and not packet_decoder.ffmpeg_available and not warned_ffmpeg:
+                    print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
+                    warned_ffmpeg = True
             if img is None:
                 continue
             ts = timestamp / 1e9  # nanoseconds -> seconds
@@ -214,6 +365,7 @@ def decode_single_bag(bag_path, output_dir, cfg):
     fmt = cfg["decode"].get("output_format", "jpg")
     quality = cfg["decode"].get("jpeg_quality", 95)
     max_frames = cfg["decode"].get("max_frames_per_bag")
+    h265_context_packets = cfg["decode"].get("h265_context_packets", 24)
 
     # 列出 topic 并匹配前视
     if bag_type == "ros1":
@@ -244,9 +396,25 @@ def decode_single_bag(bag_path, output_dir, cfg):
     clip_output_dir = os.path.join(output_dir, bag_name)
 
     if bag_type == "ros1":
-        rows = decode_bag_ros1(bag_path, front_topic, clip_output_dir, fmt, quality, max_frames)
+        rows = decode_bag_ros1(
+            bag_path,
+            front_topic,
+            clip_output_dir,
+            fmt,
+            quality,
+            max_frames,
+            h265_context_packets,
+        )
     else:
-        rows = decode_bag_ros2(bag_path, front_topic, clip_output_dir, fmt, quality, max_frames)
+        rows = decode_bag_ros2(
+            bag_path,
+            front_topic,
+            clip_output_dir,
+            fmt,
+            quality,
+            max_frames,
+            h265_context_packets,
+        )
 
     # 保存时间戳索引
     if rows:

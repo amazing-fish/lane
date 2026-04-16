@@ -12,10 +12,21 @@ data:
 
 decode:
   front_camera_topics:
-    - "/front_camera/image_raw"
-    - "/front_camera/image_raw/compressed"
-    - "/camera/front/image_raw"
-    - "/camera/front/image_raw/compressed"
+    - "/cam_1"
+    - "/cam_2"
+    - "/cam_3"
+    - "/cam_4"
+    - "/cam_5"
+    - "/cam_6"
+    - "/cam_7"
+    - "/cam_8"
+    - "/cam_9"
+    - "/cam_10"
+    - "/cam_11"
+    - "/cam_12"
+    - "/cam_13"
+    - "/cam_14"
+  h265_context_packets: 24
   output_format: "jpg"
   jpeg_quality: 95
   max_frames_per_bag: null  # null = 不限制
