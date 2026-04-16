@@ -77,7 +77,9 @@ def infer_clip(model, clip_dir, cfg, device):
         return None
 
     snippets = snippets.unsqueeze(0).to(device)
-    out = model(snippets)
+    # 推理路径显式传入 masks，保持与训练/验证一致的模型调用方式
+    masks = torch.ones((1, snippets.shape[1]), dtype=torch.bool, device=device)
+    out = model(snippets, masks)
 
     dir_probs = torch.softmax(out["direction_logits"], dim=1)[0].cpu().numpy()
     dir_pred = int(dir_probs.argmax())
