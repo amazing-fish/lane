@@ -84,15 +84,50 @@
 - 目录穿越输入返回 400，不可读出 keyframe 根目录外文件。
 - 非法标签值不会被原样写入 CSV，会被归一化为 `unknown`。
 
+## 1.4) 技术路径锚点（issue7）
+
+### 问题定义
+- **issue7**：`decode_bag.py` 对消息体的假设偏向 image buffer（raw/compressed）。
+- 对 `video_format="h265"` + `raw_data` 这类“视频包（packet）”消息无法正确解码，导致无法导出帧与 `timestamp_index.csv`。
+
+### 修复策略（固定路径）
+1. 扩展 topic 兼容性：默认候选切换为 `/cam_1 ~ /cam_14`，并将回退匹配扩展为 `front/camera/cam/video/image` 关键词。
+2. 在 `decode_bag.py` 增加 packet payload 提取（`raw_data` / `payload` / `data`）。
+3. 新增 H.265 解码路径：
+   - 优先尝试单包解码；
+   - 失败后回退到多包上下文拼接解码（ffmpeg backend）。
+4. 保持原有 raw/compressed 图像路径优先，不破坏已有 bag 流程。
+5. 在 README 与配置中固化使用说明与参数（`decode.h265_context_packets`）。
+
+### 验收标准
+- `/cam_1 ~ /cam_14` 这类 topic 可被默认匹配到。
+- `video_format="h265"` 且 `raw_data` 为 Annex B packet 的消息可尝试解码出图像。
+- 仍保持输出 `data/frames/<clip_name>/` + `timestamp_index.csv` 结构不变。
+- 原 raw/compressed 路径行为保持兼容。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.2.0 -> v0.2.1`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.2.2 -> v0.2.3`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.2.3] - bugfix
+- 按 issue7 跟进意见，`config.yaml` 的 `decode.front_camera_topics` 调整为仅保留 `/cam_1 ~ /cam_14`，去除历史冗余 topic。
+- README 与 Anchor 同步更新默认 topic 说明。
+- 版本升级到 `v0.2.3`。
+
+## [v0.2.2] - bugfix
+- 修复 `decode_bag.py` 对 H.265 包消息（如 `/cam_1` + `raw_data`）的兼容性缺口：
+  - 增加 packet payload 提取与 ffmpeg(H.265/HEVC) 解码路径；
+  - 支持“单包解码 + 多包上下文拼接回退”；
+  - 扩展前视 topic 回退匹配关键词。
+- `config.yaml` 增加默认 topic `/cam_1` 与参数 `decode.h265_context_packets`。
+- README 同步新增 H.265 包解码说明。
+- 版本升级到 `v0.2.2`。
 
 ## [v0.2.1] - bugfix
 - 根据 issue3 review 调整 Web 标注工具实现：
