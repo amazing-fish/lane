@@ -20,7 +20,6 @@ def build_transforms(image_size, is_train=True):
     if is_train:
         return transforms.Compose([
             transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],

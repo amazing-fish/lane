@@ -27,15 +27,37 @@
   - `masks` 全无效时不得出现 NaN；注意力应稳定为全 0，聚合特征稳定为 0。
 - **兼容性要求**：历史调用若不传 `masks`，模型内部自动补全全 `True` mask，行为等价于“全部有效”。
 
+## 1.1) 技术路径锚点（issue2）
+
+### 问题定义
+- **issue2**：`dataset.py` 训练增强中包含 `RandomHorizontalFlip(p=0.5)`。
+- 当前任务是前视道路片段的拓扑识别（是否双向、车道总数），左右翻转会改变道路左右结构语义，属于高风险增强。
+
+### 修复策略（固定路径）
+1. 从训练变换中移除 `RandomHorizontalFlip`。
+2. baseline 仅保留低风险增强：`Resize + ColorJitter + Normalize`。
+3. 同步更新 README 的增强策略说明，并在版本与修改日志中固化。
+
+### 验收标准
+- 训练变换不再包含 `RandomHorizontalFlip`。
+- 验证变换不受影响，不出现 train/val transform mismatch。
+- 版本与锚点日志一致，避免“代码改了但文档未跟进”的漂移。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.1.2 -> v0.1.3`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.1.3 -> v0.1.4`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.1.4] - bugfix
+- 移除训练增强中的 `RandomHorizontalFlip`，避免左右翻转破坏道路拓扑语义。
+- 训练 baseline 增强策略固定为：`Resize + ColorJitter + Normalize`。
+- README 同步增强策略说明，避免实现与文档漂移。
+- 版本升级到 `v0.1.4`。
 
 ## [v0.1.3] - bugfix
 - 加强 `AttentionMIL` 的 mask 处理：
