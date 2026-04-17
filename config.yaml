@@ -27,6 +27,7 @@ decode:
     - "/cam_13"
     - "/cam_14"
   h265_context_packets: 24
+  frame_step: 5            # 每 5 帧解码 1 帧（用于规避无效/异常帧）
   output_format: "jpg"
   jpeg_quality: 95
   max_frames_per_bag: null  # null = 不限制

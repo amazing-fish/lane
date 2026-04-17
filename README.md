@@ -42,5 +42,6 @@ python annotate_web.py --keyframe_dir ./data/keyframes --label_file ./data/keyfr
 - 默认支持 `/cam_1 ~ /cam_14` topic（可在 `config.yaml -> decode.front_camera_topics` 自定义）。
 - 当消息是视频包而非图片缓冲时，会自动走 ffmpeg(H.265/HEVC) 解码路径。
 - 若单包无法直接出图，会回退到多包上下文拼接解码（参数：`decode.h265_context_packets`）。
+- 默认按 `decode.frame_step=5` 做步进解码（每 5 帧取 1 帧），用于降低异常帧比例；可按数据源特性调整。
 
 > 说明：使用 H.265 包解码需要系统可执行 `ffmpeg`。
