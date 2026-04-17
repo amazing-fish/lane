@@ -302,6 +302,22 @@ class AsyncFrameWriter:
             self.executor.shutdown(wait=True)
 
 
+def _safe_close_resources(bag=None, writer=None):
+    """关闭资源，避免清理阶段异常覆盖主流程异常。"""
+    close_errors = []
+    if writer is not None:
+        try:
+            writer.close()
+        except Exception as e:
+            close_errors.append(f"writer.close: {e}")
+    if bag is not None:
+        try:
+            bag.close()
+        except Exception as e:
+            close_errors.append(f"bag.close: {e}")
+    return close_errors
+
+
 # ---------------------------------------------------------------------------
 # ROS1 解码
 # ---------------------------------------------------------------------------
@@ -339,6 +355,7 @@ def decode_bag_ros1(
 
     frame_step = max(1, int(frame_step))
     decoded_idx = 0
+    main_error = None
     try:
         for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
                               total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
@@ -362,9 +379,15 @@ def decode_bag_ros1(
             index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
             decoded_idx += 1
             frame_idx += 1
+    except Exception as e:
+        main_error = e
+        raise
     finally:
-        bag.close()
-        writer.close()
+        close_errors = _safe_close_resources(bag=bag, writer=writer)
+        if close_errors and main_error is not None:
+            print(f"[WARN] 清理阶段出现异常（已保留主异常）: {'; '.join(close_errors)}")
+        elif close_errors:
+            raise RuntimeError(f"清理阶段异常: {'; '.join(close_errors)}")
     return index_rows
 
 
@@ -403,6 +426,7 @@ def decode_bag_ros2(
 
     frame_step = max(1, int(frame_step))
     decoded_idx = 0
+    main_error = None
     try:
         with Ros2Reader(bag_path) as reader:
             connections = [c for c in reader.connections if c.topic == topic]
@@ -432,8 +456,15 @@ def decode_bag_ros2(
                 index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
                 decoded_idx += 1
                 frame_idx += 1
+    except Exception as e:
+        main_error = e
+        raise
     finally:
-        writer.close()
+        close_errors = _safe_close_resources(writer=writer)
+        if close_errors and main_error is not None:
+            print(f"[WARN] 清理阶段出现异常（已保留主异常）: {'; '.join(close_errors)}")
+        elif close_errors:
+            raise RuntimeError(f"清理阶段异常: {'; '.join(close_errors)}")
     return index_rows
 
 
