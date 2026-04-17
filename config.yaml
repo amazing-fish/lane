@@ -28,6 +28,9 @@ decode:
     - "/cam_14"
   h265_context_packets: 24
   frame_step: 5            # 每 5 个“成功解码帧”保留 1 帧（避免包流步进导致全损坏）
+  write_workers: 4         # CPU 多线程写盘（12核24线程机器建议先试 8）
+  ffmpeg_threads: 0        # ffmpeg 解码线程数，0=ffmpeg 自动选择（12核机器可试 8~12）
+  ffmpeg_hwaccel: "auto"   # H.265 硬件解码: auto/cuda/vaapi/qsv/videotoolbox/none（NVIDIA 可设 cuda）
   output_format: "jpg"
   jpeg_quality: 95
   max_frames_per_bag: null  # null = 不限制
