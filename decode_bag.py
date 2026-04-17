@@ -230,6 +230,27 @@ def maybe_decode_packet_message(msg, msg_type, packet_decoder):
     return packet_decoder.decode_packet(payload)
 
 
+def should_warmup_packet_buffer(msg, msg_type):
+    """判断是否应在跳帧时预热 packet buffer（不做实际解码）."""
+    has_raw_image_meta = all(hasattr(msg, k) for k in ("encoding", "height", "width"))
+    if has_raw_image_meta:
+        return False
+    if hasattr(msg, "raw_data"):
+        return True
+    video_format = str(getattr(msg, "video_format", "")).lower()
+    msg_type_l = (msg_type or "").lower()
+    return any(k in video_format for k in ("h265", "hevc")) or any(
+        k in msg_type_l for k in ("h265", "hevc")
+    )
+
+
+def warmup_packet_decoder(msg, packet_decoder):
+    """仅缓存 packet 数据，供后续采样点解码时拼接上下文."""
+    payload = extract_packet_payload(msg)
+    if payload:
+        packet_decoder.packet_buffer.append(payload)
+
+
 # ---------------------------------------------------------------------------
 # ROS1 解码
 # ---------------------------------------------------------------------------
@@ -268,6 +289,8 @@ def decode_bag_ros1(
         current_idx = msg_idx
         msg_idx += 1
         if current_idx % frame_step != 0:
+            if should_warmup_packet_buffer(msg, None):
+                warmup_packet_decoder(msg, packet_decoder)
             continue
         img = decode_image_msg(msg)
         if img is None:
@@ -327,11 +350,13 @@ def decode_bag_ros2(
                                           desc=f"ROS2 {Path(bag_path).name}"):
             if max_frames and frame_idx >= max_frames:
                 break
+            msg = deserialize_cdr(rawdata, conn.msgtype)
             current_idx = msg_idx
             msg_idx += 1
             if current_idx % frame_step != 0:
+                if should_warmup_packet_buffer(msg, conn.msgtype):
+                    warmup_packet_decoder(msg, packet_decoder)
                 continue
-            msg = deserialize_cdr(rawdata, conn.msgtype)
             img = decode_image_msg(msg, conn.msgtype)
             if img is None:
                 img = maybe_decode_packet_message(msg, conn.msgtype, packet_decoder)
