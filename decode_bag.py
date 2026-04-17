@@ -248,14 +248,20 @@ def maybe_decode_packet_message(msg, msg_type, packet_decoder):
 
 
 class AsyncFrameWriter:
-    """异步写盘：利用 CPU 多线程并发写图，降低解码主循环阻塞."""
+    """异步写盘：利用 CPU 多线程并发写图，降低解码主循环阻塞.
 
-    def __init__(self, max_workers=1):
+    通过限制 in-flight 任务数避免长视频场景下 futures 无界增长占用过多内存。
+    """
+
+    def __init__(self, max_workers=1, max_pending=0):
         self.max_workers = max(1, int(max_workers))
+        self.max_pending = max(0, int(max_pending))
         self.executor = None
-        self.futures = []
+        self.futures = deque()
         if self.max_workers > 1:
             self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            if self.max_pending == 0:
+                self.max_pending = self.max_workers * 4
 
     @staticmethod
     def _write_file(fpath, img, fmt, quality):
@@ -273,16 +279,27 @@ class AsyncFrameWriter:
             return
         fut = self.executor.submit(self._write_file, fpath, img.copy(), fmt, quality)
         self.futures.append((fpath, fut))
+        if len(self.futures) >= self.max_pending:
+            self._drain_one(wait=True)
+
+    def _drain_one(self, wait=False):
+        if not self.futures:
+            return
+        if wait:
+            fpath, fut = self.futures.popleft()
+            if not fut.result():
+                raise RuntimeError(f"异步写入失败: {fpath}")
+            return
+        while self.futures and self.futures[0][1].done():
+            fpath, fut = self.futures.popleft()
+            if not fut.result():
+                raise RuntimeError(f"异步写入失败: {fpath}")
 
     def close(self):
-        errors = []
-        for fpath, fut in self.futures:
-            if not fut.result():
-                errors.append(fpath)
+        while self.futures:
+            self._drain_one(wait=True)
         if self.executor is not None:
             self.executor.shutdown(wait=True)
-        if errors:
-            raise RuntimeError(f"异步写入失败: {len(errors)} 个文件")
 
 
 # ---------------------------------------------------------------------------
@@ -322,31 +339,32 @@ def decode_bag_ros1(
 
     frame_step = max(1, int(frame_step))
     decoded_idx = 0
-    for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
-                          total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
-        if max_frames and frame_idx >= max_frames:
-            break
-        img = decode_image_msg(msg)
-        if img is None:
-            img = maybe_decode_packet_message(msg, None, packet_decoder)
-            if img is None and extract_packet_payload(msg) and not packet_decoder.ffmpeg_available and not warned_ffmpeg:
-                print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
-                warned_ffmpeg = True
-        if img is None:
-            continue
-        if decoded_idx % frame_step != 0:
+    try:
+        for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
+                              total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
+            if max_frames and frame_idx >= max_frames:
+                break
+            img = decode_image_msg(msg)
+            if img is None:
+                img = maybe_decode_packet_message(msg, None, packet_decoder)
+                if img is None and extract_packet_payload(msg) and not packet_decoder.ffmpeg_available and not warned_ffmpeg:
+                    print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
+                    warned_ffmpeg = True
+            if img is None:
+                continue
+            if decoded_idx % frame_step != 0:
+                decoded_idx += 1
+                continue
+            ts = t.to_sec() if hasattr(t, "to_sec") else float(t)
+            fname = f"{frame_idx:06d}.{fmt}"
+            fpath = os.path.join(output_dir, fname)
+            writer.submit(fpath, img, fmt, quality)
+            index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
             decoded_idx += 1
-            continue
-        ts = t.to_sec() if hasattr(t, "to_sec") else float(t)
-        fname = f"{frame_idx:06d}.{fmt}"
-        fpath = os.path.join(output_dir, fname)
-        writer.submit(fpath, img, fmt, quality)
-        index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
-        decoded_idx += 1
-        frame_idx += 1
-
-    bag.close()
-    writer.close()
+            frame_idx += 1
+    finally:
+        bag.close()
+        writer.close()
     return index_rows
 
 
@@ -385,36 +403,37 @@ def decode_bag_ros2(
 
     frame_step = max(1, int(frame_step))
     decoded_idx = 0
-    with Ros2Reader(bag_path) as reader:
-        connections = [c for c in reader.connections if c.topic == topic]
-        if not connections:
-            raise ValueError(f"Topic {topic} not found in bag")
-        conn = connections[0]
-        for _, timestamp, rawdata in tqdm(reader.messages(connections=[conn]),
-                                          desc=f"ROS2 {Path(bag_path).name}"):
-            if max_frames and frame_idx >= max_frames:
-                break
-            msg = deserialize_cdr(rawdata, conn.msgtype)
-            img = decode_image_msg(msg, conn.msgtype)
-            if img is None:
-                img = maybe_decode_packet_message(msg, conn.msgtype, packet_decoder)
-                if img is None and extract_packet_payload(msg) and not packet_decoder.ffmpeg_available and not warned_ffmpeg:
-                    print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
-                    warned_ffmpeg = True
-            if img is None:
-                continue
-            if decoded_idx % frame_step != 0:
+    try:
+        with Ros2Reader(bag_path) as reader:
+            connections = [c for c in reader.connections if c.topic == topic]
+            if not connections:
+                raise ValueError(f"Topic {topic} not found in bag")
+            conn = connections[0]
+            for _, timestamp, rawdata in tqdm(reader.messages(connections=[conn]),
+                                              desc=f"ROS2 {Path(bag_path).name}"):
+                if max_frames and frame_idx >= max_frames:
+                    break
+                msg = deserialize_cdr(rawdata, conn.msgtype)
+                img = decode_image_msg(msg, conn.msgtype)
+                if img is None:
+                    img = maybe_decode_packet_message(msg, conn.msgtype, packet_decoder)
+                    if img is None and extract_packet_payload(msg) and not packet_decoder.ffmpeg_available and not warned_ffmpeg:
+                        print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
+                        warned_ffmpeg = True
+                if img is None:
+                    continue
+                if decoded_idx % frame_step != 0:
+                    decoded_idx += 1
+                    continue
+                ts = timestamp / 1e9  # nanoseconds -> seconds
+                fname = f"{frame_idx:06d}.{fmt}"
+                fpath = os.path.join(output_dir, fname)
+                writer.submit(fpath, img, fmt, quality)
+                index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
                 decoded_idx += 1
-                continue
-            ts = timestamp / 1e9  # nanoseconds -> seconds
-            fname = f"{frame_idx:06d}.{fmt}"
-            fpath = os.path.join(output_dir, fname)
-            writer.submit(fpath, img, fmt, quality)
-            index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
-            decoded_idx += 1
-            frame_idx += 1
-
-    writer.close()
+                frame_idx += 1
+    finally:
+        writer.close()
     return index_rows
 
 
