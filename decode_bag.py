@@ -230,27 +230,6 @@ def maybe_decode_packet_message(msg, msg_type, packet_decoder):
     return packet_decoder.decode_packet(payload)
 
 
-def should_warmup_packet_buffer(msg, msg_type):
-    """判断是否应在跳帧时预热 packet buffer（不做实际解码）."""
-    has_raw_image_meta = all(hasattr(msg, k) for k in ("encoding", "height", "width"))
-    if has_raw_image_meta:
-        return False
-    if hasattr(msg, "raw_data"):
-        return True
-    video_format = str(getattr(msg, "video_format", "")).lower()
-    msg_type_l = (msg_type or "").lower()
-    return any(k in video_format for k in ("h265", "hevc")) or any(
-        k in msg_type_l for k in ("h265", "hevc")
-    )
-
-
-def warmup_packet_decoder(msg, packet_decoder):
-    """仅缓存 packet 数据，供后续采样点解码时拼接上下文."""
-    payload = extract_packet_payload(msg)
-    if payload:
-        packet_decoder.packet_buffer.append(payload)
-
-
 # ---------------------------------------------------------------------------
 # ROS1 解码
 # ---------------------------------------------------------------------------
@@ -271,8 +250,6 @@ def decode_bag_ros1(
         raise ImportError("需要安装 rosbag: pip install rosbag")
     bag = rosbag.Bag(str(bag_path), "r")
     msg_count = bag.get_message_count(topic)
-    if max_frames:
-        msg_count = min(msg_count, max_frames)
 
     os.makedirs(output_dir, exist_ok=True)
     index_rows = []
@@ -281,17 +258,11 @@ def decode_bag_ros1(
     warned_ffmpeg = False
 
     frame_step = max(1, int(frame_step))
-    msg_idx = 0
+    decoded_idx = 0
     for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
                           total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
         if max_frames and frame_idx >= max_frames:
             break
-        current_idx = msg_idx
-        msg_idx += 1
-        if current_idx % frame_step != 0:
-            if should_warmup_packet_buffer(msg, None):
-                warmup_packet_decoder(msg, packet_decoder)
-            continue
         img = decode_image_msg(msg)
         if img is None:
             img = maybe_decode_packet_message(msg, None, packet_decoder)
@@ -299,6 +270,9 @@ def decode_bag_ros1(
                 print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
                 warned_ffmpeg = True
         if img is None:
+            continue
+        if decoded_idx % frame_step != 0:
+            decoded_idx += 1
             continue
         ts = t.to_sec() if hasattr(t, "to_sec") else float(t)
         fname = f"{frame_idx:06d}.{fmt}"
@@ -308,6 +282,7 @@ def decode_bag_ros1(
         else:
             cv2.imwrite(fpath, img)
         index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
+        decoded_idx += 1
         frame_idx += 1
 
     bag.close()
@@ -340,7 +315,7 @@ def decode_bag_ros2(
     warned_ffmpeg = False
 
     frame_step = max(1, int(frame_step))
-    msg_idx = 0
+    decoded_idx = 0
     with Ros2Reader(bag_path) as reader:
         connections = [c for c in reader.connections if c.topic == topic]
         if not connections:
@@ -351,12 +326,6 @@ def decode_bag_ros2(
             if max_frames and frame_idx >= max_frames:
                 break
             msg = deserialize_cdr(rawdata, conn.msgtype)
-            current_idx = msg_idx
-            msg_idx += 1
-            if current_idx % frame_step != 0:
-                if should_warmup_packet_buffer(msg, conn.msgtype):
-                    warmup_packet_decoder(msg, packet_decoder)
-                continue
             img = decode_image_msg(msg, conn.msgtype)
             if img is None:
                 img = maybe_decode_packet_message(msg, conn.msgtype, packet_decoder)
@@ -364,6 +333,9 @@ def decode_bag_ros2(
                     print("[WARN] 检测到可能的视频包消息，但系统未安装 ffmpeg，无法解码 H.265。")
                     warned_ffmpeg = True
             if img is None:
+                continue
+            if decoded_idx % frame_step != 0:
+                decoded_idx += 1
                 continue
             ts = timestamp / 1e9  # nanoseconds -> seconds
             fname = f"{frame_idx:06d}.{fmt}"
@@ -373,6 +345,7 @@ def decode_bag_ros2(
             else:
                 cv2.imwrite(fpath, img)
             index_rows.append({"frame_idx": frame_idx, "timestamp": ts, "filename": fname})
+            decoded_idx += 1
             frame_idx += 1
 
     return index_rows
