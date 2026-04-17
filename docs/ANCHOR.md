@@ -156,15 +156,108 @@
 - 默认仍是每 5 帧保留 1 帧，但定义为“每 5 个成功解码帧保留 1 帧”。
 - ROS1 / ROS2 解码行为一致。
 
+## 1.8) 技术路径锚点（issue11）
+
+### 问题定义
+- **issue11**：当前 `decode_bag.py` 解码链路为单线程串行写盘，H.265 包流也仅走 CPU ffmpeg 默认路径。
+- 在大 bag 或高分辨率场景下，写盘阻塞与纯 CPU 解码会明显限制吞吐。
+
+### 修复策略（固定路径）
+1. 在 `decode_bag.py` 新增 `AsyncFrameWriter`，用线程池执行异步写盘，减小主解码循环阻塞。
+2. 新增配置 `decode.write_workers`，统一控制 ROS1 / ROS2 两条链路的写盘并发度。
+3. 在 `H265PacketDecoder` 增加 `ffmpeg_threads` 与 `ffmpeg_hwaccel` 参数：
+   - 支持 ffmpeg 多线程解码；
+   - 支持硬件加速（如 `auto/cuda/vaapi/qsv/videotoolbox`）。
+4. 硬件解码失败时自动回退到 CPU 路径，保证兼容性与稳定性。
+5. 在 `config.yaml` 与 README 固化新增参数说明，避免实现与文档漂移。
+
+### 验收标准
+- `decode.write_workers>1` 时可并发写图，功能与输出结构保持一致。
+- 配置 `decode.ffmpeg_hwaccel` 后可尝试 GPU 硬件解码；若不可用会自动回退 CPU。
+- ROS1 / ROS2 解码行为一致，`timestamp_index.csv` 结构不变。
+
+## 1.9) 技术路径锚点（issue12）
+
+### 问题定义
+- **issue12**：在新增 CPU 多线程 + GPU 解码能力后，缺少针对常见高配机器（如 12C/24T + NVIDIA A4000）的参数选型指引。
+- 业务同学难以快速判断“CPU/GPU 该怎么选”，容易导致配置偏保守或不稳定。
+
+### 修复策略（固定路径）
+1. 在 README 增加“解码硬件选择建议”小节，明确推荐 `CPU+GPU` 混合方案。
+2. 在 `config.yaml` 的解码参数注释中给出可直接落地的调参区间（`write_workers`、`ffmpeg_threads`、`ffmpeg_hwaccel`）。
+3. 保持代码行为不变，仅补全选型与调参锚点，避免文档与实现漂移。
+
+### 验收标准
+- README 对 12C/24T + A4000 给出明确的推荐组合与理由。
+- `config.yaml` 同步给出对应参数建议，便于直接复制使用。
+
+## 1.10) 技术路径锚点（issue13）
+
+### 问题定义
+- **issue13**：异步写盘首版实现将所有 future 持续累积到内存，长时解码可能出现内存增长。
+- ROS1/ROS2 解码循环中若中途异常，写盘线程资源回收与 bag 关闭需要更强兜底。
+
+### 修复策略（固定路径）
+1. `AsyncFrameWriter` 改为有界 in-flight 队列（默认 `max_workers*4`），边提交边回收完成任务。
+2. `decode_bag_ros1` 与 `decode_bag_ros2` 增加 `try/finally`，确保异常路径下也会执行 `bag.close()/writer.close()`。
+3. 保持输出行为不变（文件命名、抽样语义、索引结构）。
+
+### 验收标准
+- 长时解码时异步写盘不会因 future 无界累积导致明显内存失控。
+- 解码异常时可稳定回收线程池与 bag 句柄。
+- `timestamp_index.csv` 与历史结构保持一致。
+
+## 1.11) 技术路径锚点（issue14）
+
+### 问题定义
+- **issue14**：解码主循环抛出业务异常时，`finally` 中的资源关闭异常可能覆盖原始异常，增加排障难度（P2）。
+
+### 修复策略（固定路径）
+1. 在 `decode_bag.py` 增加 `_safe_close_resources`，统一收敛 `writer.close` / `bag.close` 的清理异常。
+2. ROS1/ROS2 解码循环记录主异常：
+   - 若主异常存在，清理异常仅告警输出，不覆盖主异常；
+   - 若无主异常但清理失败，抛出清理异常，避免静默失败。
+3. 不改变解码输出行为与抽样语义，仅修复异常处理优先级。
+
+### 验收标准
+- 主流程异常不被清理阶段异常覆盖。
+- 清理阶段异常在“无主异常”情况下可被显式抛出。
+- 解码路径输出结构保持兼容。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.2.5 -> v0.2.6`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.3.2 -> v0.3.3`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.3.3] - bugfix
+- 修复解码清理阶段异常覆盖主异常的问题：新增 `_safe_close_resources`，统一处理 writer/bag 关闭异常。
+- ROS1/ROS2 解码流程在存在主异常时仅告警清理异常，保证根因异常可见；无主异常时清理失败会显式抛出。
+- 版本升级到 `v0.3.3`。
+
+## [v0.3.2] - bugfix
+- 修复异步写盘的资源管理问题：`AsyncFrameWriter` 引入有界 in-flight future 回收机制，避免长时解码内存增长。
+- ROS1/ROS2 解码循环增加 `try/finally` 兜底，异常路径下也能正确关闭 bag 句柄与写盘线程池。
+- 版本升级到 `v0.3.2`。
+
+## [v0.3.1] - bugfix
+- 补充高配机器（12C/24T + A4000）解码参数选型说明，明确推荐 CPU+GPU 混合方案。
+- `README.md` 新增硬件选择建议小节，给出 `cuda + write_workers + ffmpeg_threads` 的实践参数范围。
+- `config.yaml` 注释补全对应调参建议，避免实现能力与使用路径漂移。
+- 版本升级到 `v0.3.1`。
+
+## [v0.3.0] - feature
+- 新增解码 CPU 多线程能力：
+  - `decode_bag.py` 引入 `AsyncFrameWriter`，支持异步并发写盘；
+  - `config.yaml` 新增 `decode.write_workers`。
+- 新增解码 GPU/多线程加速能力：
+  - `H265PacketDecoder` 支持 `decode.ffmpeg_threads` 与 `decode.ffmpeg_hwaccel`；
+  - 硬件加速失败自动回退 CPU，避免解码中断。
+- README 补充新增参数说明，版本升级到 `v0.3.0`。
 
 ## [v0.2.6] - bugfix
 - 修复 `decode_bag.py` 的步进抽样语义：由“消息步进”改为“成功解码帧步进”。
