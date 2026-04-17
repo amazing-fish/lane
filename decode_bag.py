@@ -242,6 +242,7 @@ def decode_bag_ros1(
     quality=95,
     max_frames=None,
     h265_context_packets=24,
+    frame_step=1,
 ):
     """从 ROS1 bag 导出图像帧."""
     rosbag = _try_import_rosbag()
@@ -258,10 +259,16 @@ def decode_bag_ros1(
     packet_decoder = H265PacketDecoder(context_packets=h265_context_packets)
     warned_ffmpeg = False
 
+    frame_step = max(1, int(frame_step))
+    msg_idx = 0
     for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
                           total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
         if max_frames and frame_idx >= max_frames:
             break
+        current_idx = msg_idx
+        msg_idx += 1
+        if current_idx % frame_step != 0:
+            continue
         img = decode_image_msg(msg)
         if img is None:
             img = maybe_decode_packet_message(msg, None, packet_decoder)
@@ -296,6 +303,7 @@ def decode_bag_ros2(
     quality=95,
     max_frames=None,
     h265_context_packets=24,
+    frame_step=1,
 ):
     """从 ROS2 bag 导出图像帧."""
     Ros2Reader, deserialize_cdr = _try_import_rosbags()
@@ -308,6 +316,8 @@ def decode_bag_ros2(
     packet_decoder = H265PacketDecoder(context_packets=h265_context_packets)
     warned_ffmpeg = False
 
+    frame_step = max(1, int(frame_step))
+    msg_idx = 0
     with Ros2Reader(bag_path) as reader:
         connections = [c for c in reader.connections if c.topic == topic]
         if not connections:
@@ -317,6 +327,10 @@ def decode_bag_ros2(
                                           desc=f"ROS2 {Path(bag_path).name}"):
             if max_frames and frame_idx >= max_frames:
                 break
+            current_idx = msg_idx
+            msg_idx += 1
+            if current_idx % frame_step != 0:
+                continue
             msg = deserialize_cdr(rawdata, conn.msgtype)
             img = decode_image_msg(msg, conn.msgtype)
             if img is None:
@@ -366,6 +380,7 @@ def decode_single_bag(bag_path, output_dir, cfg):
     quality = cfg["decode"].get("jpeg_quality", 95)
     max_frames = cfg["decode"].get("max_frames_per_bag")
     h265_context_packets = cfg["decode"].get("h265_context_packets", 24)
+    frame_step = cfg["decode"].get("frame_step", 1)
 
     # 列出 topic 并匹配前视
     if bag_type == "ros1":
@@ -404,6 +419,7 @@ def decode_single_bag(bag_path, output_dir, cfg):
             quality,
             max_frames,
             h265_context_packets,
+            frame_step,
         )
     else:
         rows = decode_bag_ros2(
@@ -414,6 +430,7 @@ def decode_single_bag(bag_path, output_dir, cfg):
             quality,
             max_frames,
             h265_context_packets,
+            frame_step,
         )
 
     # 保存时间戳索引

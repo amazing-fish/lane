@@ -105,15 +105,38 @@
 - 仍保持输出 `data/frames/<clip_name>/` + `timestamp_index.csv` 结构不变。
 - 原 raw/compressed 路径行为保持兼容。
 
+## 1.5) 技术路径锚点（issue8）
+
+### 问题定义
+- **issue8**：部分 bag 数据中存在大量异常帧，业务侧确认按固定步进抽样解码更稳妥（建议每 5 帧解 1 帧）。
+- 现有 `decode_bag.py` 默认逐消息尝试解码，异常帧会大量落盘并进入后续流程，影响效率与样本质量。
+
+### 修复策略（固定路径）
+1. 在 `decode_bag.py` 的 ROS1/ROS2 解码循环中增加“消息步进”参数 `frame_step`。
+2. 仅对满足 `msg_idx % frame_step == 0` 的消息执行解码；其余直接跳过。
+3. 在 `config.yaml` 中新增 `decode.frame_step`，默认值设为 `5`，保持可配置。
+4. 在 README 同步默认行为说明，避免“代码逻辑与文档描述”漂移。
+
+### 验收标准
+- 默认配置下解码行为为“每 5 帧取 1 帧”。
+- `decode.frame_step` 可调，且最小值兜底为 `1`（不抽样）。
+- ROS1 与 ROS2 两条解码路径行为一致。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.2.2 -> v0.2.3`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.2.3 -> v0.2.4`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.2.4] - bugfix
+- 新增 `decode.frame_step` 配置项，默认值为 `5`，解码阶段按“每 5 帧取 1 帧”步进处理，降低异常帧落盘比例。
+- `decode_bag.py` 的 ROS1/ROS2 解码流程统一接入步进过滤逻辑，并对 `frame_step` 做最小值兜底。
+- README 同步默认解码步进说明，避免实现与文档漂移。
+- 版本升级到 `v0.2.4`。
 
 ## [v0.2.3] - bugfix
 - 按 issue7 跟进意见，`config.yaml` 的 `decode.front_camera_topics` 调整为仅保留 `/cam_1 ~ /cam_14`，去除历史冗余 topic。
