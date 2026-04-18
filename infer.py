@@ -1,9 +1,9 @@
 """
-infer.py - 推理脚本: 对视频片段推理，输出预测类别、置信度、证据片段
+infer.py - segment 级推理脚本
 
 用法:
-    python infer.py --config config.yaml
-    python infer.py --checkpoint checkpoints/best.pth --clip_dir ./data/frames/bag001
+  python infer.py --config config.yaml --clip_dir ./data/frames/bag001 --start_frame 100 --end_frame 220
+  python infer.py --config config.yaml --manifest ./data/val_manifest.csv
 """
 
 import argparse
@@ -20,6 +20,13 @@ from model import build_model
 
 DIRECTION_NAMES = ["unidirectional", "bidirectional"]
 LANE_NAMES = ["1", "2", "3", "4", "5", "6+"]
+
+
+def safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def load_model(cfg, checkpoint_path, device):
@@ -39,15 +46,28 @@ def build_infer_transform(image_size):
     ])
 
 
-def load_clip_frames(clip_dir, transform):
+def load_segment_frames(clip_dir, start_frame, end_frame, transform):
+    if not os.path.isdir(clip_dir):
+        return [], [], (start_frame, end_frame)
+
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
     frame_files = sorted([
         f for f in os.listdir(clip_dir)
         if os.path.splitext(f)[1].lower() in exts
     ])
-    frames = [transform(Image.open(os.path.join(clip_dir, f)).convert("RGB"))
-              for f in frame_files]
-    return frames, frame_files
+    if not frame_files:
+        return [], [], (start_frame, end_frame)
+
+    max_idx = len(frame_files) - 1
+    clipped_start = max(0, start_frame)
+    clipped_end = min(max_idx, end_frame)
+
+    if clipped_start > clipped_end:
+        return [], [], (clipped_start, clipped_end)
+
+    selected_files = frame_files[clipped_start:clipped_end + 1]
+    frames = [transform(Image.open(os.path.join(clip_dir, f)).convert("RGB")) for f in selected_files]
+    return frames, selected_files, (clipped_start, clipped_end)
 
 
 def create_snippets(frames, snippet_length, snippet_stride):
@@ -65,10 +85,10 @@ def create_snippets(frames, snippet_length, snippet_stride):
 
 
 @torch.no_grad()
-def infer_clip(model, clip_dir, cfg, device):
+def infer_segment(model, clip_dir, start_frame, end_frame, cfg, device):
     mcfg = cfg["model"]
     transform = build_infer_transform(mcfg["image_size"])
-    frames, frame_files = load_clip_frames(clip_dir, transform)
+    frames, frame_files, (actual_start, actual_end) = load_segment_frames(clip_dir, start_frame, end_frame, transform)
     if not frames:
         return None
 
@@ -77,7 +97,6 @@ def infer_clip(model, clip_dir, cfg, device):
         return None
 
     snippets = snippets.unsqueeze(0).to(device)
-    # 推理路径显式传入 masks，保持与训练/验证一致的模型调用方式
     masks = torch.ones((1, snippets.shape[1]), dtype=torch.bool, device=device)
     out = model(snippets, masks)
 
@@ -95,9 +114,13 @@ def infer_clip(model, clip_dir, cfg, device):
         sf = starts[si]
         ef = min(sf + mcfg["snippet_length"] - 1, len(frame_files) - 1)
         evidence.append({
-            "rank": rank + 1, "snippet_idx": int(si),
+            "rank": rank + 1,
+            "snippet_idx": int(si),
             "attention": float(attn[si]),
-            "start_frame": frame_files[sf], "end_frame": frame_files[ef],
+            "start_frame": actual_start + sf,
+            "end_frame": actual_start + ef,
+            "start_frame_name": frame_files[sf],
+            "end_frame_name": frame_files[ef],
         })
 
     return {
@@ -108,14 +131,35 @@ def infer_clip(model, clip_dir, cfg, device):
         "evidence": evidence,
         "num_frames": len(frames),
         "num_snippets": len(starts),
+        "start_frame": actual_start,
+        "end_frame": actual_end,
+    }
+
+
+def manifest_row_to_segment(row):
+    start_frame = safe_int(row.get("start_frame"), 0)
+    if "end_frame" in row and str(row.get("end_frame", "")).strip() != "":
+        end_frame = safe_int(row.get("end_frame"), start_frame)
+    else:
+        frame_count = safe_int(row.get("frame_count"), 0)
+        end_frame = start_frame + max(0, frame_count - 1)
+
+    return {
+        "sample_id": row.get("sample_id", row.get("clip", "unknown")),
+        "clip": row.get("clip", "unknown"),
+        "clip_dir": row.get("clip_dir", ""),
+        "start_frame": start_frame,
+        "end_frame": end_frame,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Lane MVP inference")
+    parser = argparse.ArgumentParser(description="Lane MVP segment inference")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--clip_dir", default=None, help="Single clip dir")
+    parser.add_argument("--clip_dir", default=None, help="Single segment clip dir")
+    parser.add_argument("--start_frame", type=int, default=None)
+    parser.add_argument("--end_frame", type=int, default=None)
     parser.add_argument("--manifest", default=None, help="Manifest CSV for batch")
     args = parser.parse_args()
 
@@ -129,54 +173,82 @@ def main():
     output_dir = cfg["inference"].get("output_dir", "./results")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 收集 clips
-    clips = []
+    segments = []
     if args.clip_dir:
-        clips = [("custom", args.clip_dir)]
+        if args.start_frame is None or args.end_frame is None:
+            raise ValueError("使用 --clip_dir 时必须同时传 --start_frame 与 --end_frame")
+        if args.end_frame < args.start_frame:
+            raise ValueError("--end_frame 不能小于 --start_frame")
+        segments = [{
+            "sample_id": "custom",
+            "clip": "custom",
+            "clip_dir": args.clip_dir,
+            "start_frame": args.start_frame,
+            "end_frame": args.end_frame,
+        }]
     else:
         manifest = args.manifest or cfg["data"].get("val_manifest")
         if manifest and os.path.exists(manifest):
-            with open(manifest, "r") as f:
+            with open(manifest, "r", encoding="utf-8") as f:
                 for row in csv.DictReader(f):
-                    clips.append((row["clip"], row["clip_dir"]))
+                    seg = manifest_row_to_segment(row)
+                    if not seg["clip_dir"]:
+                        print(f"[WARN] skip row without clip_dir: {seg['sample_id']}")
+                        continue
+                    segments.append(seg)
 
-    if not clips:
-        print("[ERROR] No clips. Use --clip_dir or --manifest.")
+    if not segments:
+        print("[ERROR] No segments. Use --clip_dir + --start_frame + --end_frame or --manifest.")
         return
 
-    print(f"Inferring {len(clips)} clips...")
+    print(f"Inferring {len(segments)} segments...")
     results = []
 
-    for clip_name, clip_dir in clips:
-        result = infer_clip(model, clip_dir, cfg, device)
+    for seg in segments:
+        result = infer_segment(model, seg["clip_dir"], seg["start_frame"], seg["end_frame"], cfg, device)
         if result is None:
-            print(f"  [SKIP] {clip_name}: no frames")
+            print(f"  [SKIP] {seg['sample_id']}: no frames in range [{seg['start_frame']}, {seg['end_frame']}]")
             continue
-        results.append({"clip": clip_name, **result})
+        out_row = {**seg, **result}
+        results.append(out_row)
         ev_str = " | ".join(
             f"#{e['rank']}({e['attention']:.3f}): {e['start_frame']}-{e['end_frame']}"
-            for e in result["evidence"])
-        print(f"  {clip_name}: dir={result['direction']}({result['direction_confidence']:.2f}) "
-              f"lanes={result['lane_count']}({result['lane_count_confidence']:.2f}) "
-              f"evidence=[{ev_str}]")
+            for e in result["evidence"]
+        )
+        print(
+            f"  {seg['sample_id']}: range=[{result['start_frame']},{result['end_frame']}] "
+            f"dir={result['direction']}({result['direction_confidence']:.2f}) "
+            f"lanes={result['lane_count']}({result['lane_count_confidence']:.2f}) "
+            f"evidence=[{ev_str}]"
+        )
 
-    # 保存结果
     output_file = cfg["inference"].get("output_file", os.path.join(output_dir, "predictions.csv"))
-    with open(output_file, "w", newline="") as f:
+    with open(output_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "clip", "direction", "direction_confidence",
-            "lane_count", "lane_count_confidence",
-            "num_frames", "num_snippets", "top_evidence"])
+            "sample_id", "clip", "clip_dir", "start_frame", "end_frame",
+            "direction", "direction_confidence", "lane_count", "lane_count_confidence",
+            "num_frames", "num_snippets", "top_evidence"
+        ])
         writer.writeheader()
         for r in results:
-            top_ev = r["evidence"][0]["start_frame"] if r["evidence"] else ""
+            top_ev = ""
+            if r["evidence"]:
+                ev0 = r["evidence"][0]
+                top_ev = f"{ev0['start_frame']}-{ev0['end_frame']}"
             writer.writerow({
-                "clip": r["clip"], "direction": r["direction"],
+                "sample_id": r["sample_id"],
+                "clip": r["clip"],
+                "clip_dir": r["clip_dir"],
+                "start_frame": r["start_frame"],
+                "end_frame": r["end_frame"],
+                "direction": r["direction"],
                 "direction_confidence": f"{r['direction_confidence']:.4f}",
                 "lane_count": r["lane_count"],
                 "lane_count_confidence": f"{r['lane_count_confidence']:.4f}",
-                "num_frames": r["num_frames"], "num_snippets": r["num_snippets"],
-                "top_evidence": top_ev})
+                "num_frames": r["num_frames"],
+                "num_snippets": r["num_snippets"],
+                "top_evidence": top_ev,
+            })
 
     print(f"\nResults -> {output_file}")
 

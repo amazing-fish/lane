@@ -1,14 +1,13 @@
 """
-dataset.py - PyTorch Dataset: 从 manifest 加载 clip snippet bags
+dataset.py - PyTorch Dataset: 从 segment manifest 加载 snippet bags
 
-每个样本 = 一个 clip 的所有 snippet，每个 snippet = snippet_length 帧
+每个样本 = 一个 segment 的所有 snippet，每个 snippet = snippet_length 帧
 """
 
 import csv
 import os
 import random
 
-import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
@@ -33,16 +32,8 @@ def build_transforms(image_size, is_train=True):
     ])
 
 
-class LaneClipDataset(Dataset):
-    """
-    Clip 级 Dataset。
-
-    每个样本返回:
-        snippets: (N, T, C, H, W) - N 个 snippet
-        direction_label: int (0=单向, 1=双向, -1=unknown)
-        lane_count_label: int (0~5 对应 1~6+, -1=unknown)
-        clip_id: str
-    """
+class LaneSegmentDataset(Dataset):
+    """Segment 级 Dataset。"""
 
     def __init__(self, manifest_path, cfg, is_train=True):
         self.cfg = cfg
@@ -51,14 +42,16 @@ class LaneClipDataset(Dataset):
         self.is_train = is_train
         self.transform = build_transforms(cfg["model"]["image_size"], is_train)
 
-        # 读取 manifest
         self.samples = []
-        with open(manifest_path, "r") as f:
+        with open(manifest_path, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 self.samples.append({
+                    "sample_id": row.get("sample_id", row.get("clip", "unknown")),
                     "clip": row["clip"],
                     "clip_dir": row["clip_dir"],
-                    "frame_count": int(row["frame_count"]),
+                    "start_frame": int(row.get("start_frame", 0)),
+                    "end_frame": int(row.get("end_frame", int(row.get("frame_count", 0)) - 1)),
+                    "frame_count": int(row.get("frame_count", 0)),
                     "is_bidirectional": int(row["is_bidirectional"]),
                     "lane_count": int(row["lane_count"]),
                 })
@@ -67,85 +60,105 @@ class LaneClipDataset(Dataset):
         return len(self.samples)
 
     def _load_frame_list(self, clip_dir):
-        """加载 clip 目录下的帧文件列表（按文件名排序）."""
         exts = {".jpg", ".jpeg", ".png", ".bmp"}
-        frames = sorted([
+        if not os.path.isdir(clip_dir):
+            print(f"[WARN] clip_dir 不存在或不可访问: {clip_dir}")
+            return []
+        return sorted([
             os.path.join(clip_dir, f) for f in os.listdir(clip_dir)
             if os.path.splitext(f)[1].lower() in exts
         ])
-        return frames
+
+    def _slice_segment_frames(self, frame_paths, start_frame, end_frame, sample_id):
+        if not frame_paths:
+            return []
+
+        max_idx = len(frame_paths) - 1
+        clipped_start = max(0, start_frame)
+        clipped_end = min(max_idx, end_frame)
+
+        if clipped_start != start_frame or clipped_end != end_frame:
+            print(
+                f"[WARN] segment {sample_id} 区间越界，已裁剪: "
+                f"[{start_frame}, {end_frame}] -> [{clipped_start}, {clipped_end}]"
+            )
+
+        if clipped_start > clipped_end:
+            print(f"[WARN] segment {sample_id} 裁剪后无有效帧")
+            return []
+
+        return frame_paths[clipped_start:clipped_end + 1]
 
     def _create_snippets(self, frame_paths):
-        """将帧序列切分为 snippet，返回 snippet 起始索引列表."""
         n = len(frame_paths)
         if n < self.snippet_length:
-            return [0]  # 帧不够时只取一个 snippet（会 pad）
+            return [0]
         indices = list(range(0, n - self.snippet_length + 1, self.snippet_stride))
-        if not indices:
-            indices = [0]
-        return indices
+        return indices if indices else [0]
 
     def _load_snippet(self, frame_paths, start_idx):
-        """加载一个 snippet 的帧并应用变换."""
         frames = []
         for i in range(self.snippet_length):
-            idx = min(start_idx + i, len(frame_paths) - 1)  # pad by repeating last
+            idx = min(start_idx + i, len(frame_paths) - 1)
             img = Image.open(frame_paths[idx]).convert("RGB")
-            img = self.transform(img)
-            frames.append(img)
-        return torch.stack(frames, dim=0)  # (T, C, H, W)
+            frames.append(self.transform(img))
+        return torch.stack(frames, dim=0)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
         frame_paths = self._load_frame_list(sample["clip_dir"])
+        frame_paths = self._slice_segment_frames(
+            frame_paths,
+            sample["start_frame"],
+            sample["end_frame"],
+            sample["sample_id"],
+        )
 
         if not frame_paths:
-            # 空 clip 兜底：返回零张量
-            T = self.snippet_length
-            dummy = torch.zeros(1, T, 3, self.cfg["model"]["image_size"],
-                                self.cfg["model"]["image_size"])
+            t = self.snippet_length
+            s = self.cfg["model"]["image_size"]
+            dummy = torch.zeros(1, t, 3, s, s)
             return {
                 "snippets": dummy,
                 "direction_label": sample["is_bidirectional"],
                 "lane_count_label": sample["lane_count"],
                 "clip_id": sample["clip"],
+                "sample_id": sample["sample_id"],
+                "segment_start": sample["start_frame"],
+                "segment_end": sample["end_frame"],
             }
 
         snippet_starts = self._create_snippets(frame_paths)
-
-        # 训练时随机采样部分 snippet 控制显存
         max_snippets = 8
         if self.is_train and len(snippet_starts) > max_snippets:
             snippet_starts = sorted(random.sample(snippet_starts, max_snippets))
 
-        snippets = []
-        for start in snippet_starts:
-            snippet = self._load_snippet(frame_paths, start)
-            snippets.append(snippet)
-
-        snippets = torch.stack(snippets, dim=0)  # (N, T, C, H, W)
-
+        snippets = torch.stack([self._load_snippet(frame_paths, start) for start in snippet_starts], dim=0)
         return {
             "snippets": snippets,
             "direction_label": sample["is_bidirectional"],
             "lane_count_label": sample["lane_count"],
             "clip_id": sample["clip"],
+            "sample_id": sample["sample_id"],
+            "segment_start": sample["start_frame"],
+            "segment_end": sample["end_frame"],
         }
 
 
+# 向后兼容旧命名
+LaneClipDataset = LaneSegmentDataset
+
+
 def collate_fn(batch):
-    """
-    自定义 collate: 不同 clip 的 snippet 数量可能不同，pad 到同一长度。
-    """
     max_n = max(item["snippets"].shape[0] for item in batch)
-    T, C, H, W = batch[0]["snippets"].shape[1:]
+    t, c, h, w = batch[0]["snippets"].shape[1:]
 
     padded_snippets = []
     masks = []
     for item in batch:
         n = item["snippets"].shape[0]
         if n < max_n:
-            pad = torch.zeros(max_n - n, T, C, H, W)
+            pad = torch.zeros(max_n - n, t, c, h, w)
             padded = torch.cat([item["snippets"], pad], dim=0)
         else:
             padded = item["snippets"]
@@ -155,9 +168,12 @@ def collate_fn(batch):
         masks.append(mask)
 
     return {
-        "snippets": torch.stack(padded_snippets),       # (B, N, T, C, H, W)
-        "masks": torch.stack(masks),                      # (B, N)
+        "snippets": torch.stack(padded_snippets),
+        "masks": torch.stack(masks),
         "direction_label": torch.tensor([b["direction_label"] for b in batch]),
         "lane_count_label": torch.tensor([b["lane_count_label"] for b in batch]),
         "clip_id": [b["clip_id"] for b in batch],
+        "sample_id": [b["sample_id"] for b in batch],
+        "segment_start": torch.tensor([b["segment_start"] for b in batch]),
+        "segment_end": torch.tensor([b["segment_end"] for b in batch]),
     }

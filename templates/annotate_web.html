@@ -26,12 +26,23 @@
       <button id="nextBtn">下一张 →</button>
       <button id="saveBtn">保存 (Ctrl/Cmd+S)</button>
       <span class="pill" id="progress"></span>
+      <span class="pill" id="meta"></span>
       <span class="pill" id="labeled"></span>
       <span class="status" id="status"></span>
     </div>
 
     <div class="card imgbox">
       <img id="kfImg" alt="keyframe" />
+    </div>
+
+    <div class="card">
+      <fieldset>
+        <legend>帧范围 frame_scope</legend>
+        <label><input type="radio" name="scope" value="slope"> slope</label>
+        <label><input type="radio" name="scope" value="transition"> transition</label>
+        <label><input type="radio" name="scope" value="non_slope"> non_slope</label>
+        <label><input type="radio" name="scope" value="unknown"> unknown</label>
+      </fieldset>
     </div>
 
     <div class="card">
@@ -54,6 +65,7 @@
         <label><input type="radio" name="lane" value="6+">6+</label>
         <label><input type="radio" name="lane" value="unknown">unknown (0)</label>
       </fieldset>
+      <p class="hint">规则：当 frame_scope != slope 时，is_bidirectional 与 lane_count 自动归一化为 unknown。</p>
       <p class="hint">快捷键：←/A 上一张，→/D 下一张，B/N/U 设置双向，1-6 设置车道（6=6+），0=unknown，Ctrl/Cmd+S 保存。</p>
     </div>
   </div>
@@ -75,6 +87,28 @@ function currentRel() {
   return state.images[state.idx] || '';
 }
 
+function getMeta(rel) {
+  const norm = rel.replaceAll('\\\\', '/');
+  const parts = norm.split('/');
+  const clipId = parts.length ? parts[0] : 'unknown';
+  const base = parts[parts.length - 1] || '';
+  const stem = base.replace(/\.[^.]+$/, '');
+  const nums = stem.match(/\d+/g);
+  const frameIdx = nums && nums.length ? parseInt(nums[nums.length - 1], 10) : -1;
+  return { clipId, frameIdx };
+}
+
+function normalizeLabel(v) {
+  const scope = ['slope', 'transition', 'non_slope', 'unknown'].includes(v.frame_scope) ? v.frame_scope : 'unknown';
+  let dir = ['yes', 'no', 'unknown'].includes(v.is_bidirectional) ? v.is_bidirectional : 'unknown';
+  let lane = ['1', '2', '3', '4', '5', '6+', 'unknown'].includes(v.lane_count) ? v.lane_count : 'unknown';
+  if (scope !== 'slope') {
+    dir = 'unknown';
+    lane = 'unknown';
+  }
+  return { frame_scope: scope, is_bidirectional: dir, lane_count: lane };
+}
+
 function setStatus(msg) {
   document.getElementById('status').textContent = msg;
 }
@@ -83,7 +117,7 @@ function calcLabeled() {
   let count = 0;
   for (const key of Object.keys(state.labels)) {
     const v = state.labels[key] || {};
-    if ((v.is_bidirectional && v.is_bidirectional !== 'unknown') || (v.lane_count && v.lane_count !== 'unknown')) {
+    if ((v.frame_scope || 'unknown') !== 'unknown') {
       count += 1;
     }
   }
@@ -93,22 +127,27 @@ function calcLabeled() {
 function render() {
   const rel = currentRel();
   if (!rel) return;
+  const meta = getMeta(rel);
   document.getElementById('kfImg').src = `/image/${encodeURIComponent(rel)}`;
   document.getElementById('progress').textContent = `[${state.idx + 1}/${state.total}] ${rel}`;
+  document.getElementById('meta').textContent = `clip=${meta.clipId}, frame=${meta.frameIdx}`;
   document.getElementById('labeled').textContent = `已标注: ${calcLabeled()}/${state.total}`;
 
-  const lbl = state.labels[rel] || { is_bidirectional: 'unknown', lane_count: 'unknown' };
-  byName('dir', lbl.is_bidirectional || 'unknown');
-  byName('lane', lbl.lane_count || 'unknown');
+  const lbl = normalizeLabel(state.labels[rel] || { frame_scope: 'unknown', is_bidirectional: 'unknown', lane_count: 'unknown' });
+  byName('scope', lbl.frame_scope);
+  byName('dir', lbl.is_bidirectional);
+  byName('lane', lbl.lane_count);
 }
 
 function updateLabel() {
   const rel = currentRel();
   if (!rel) return;
-  state.labels[rel] = {
+  const next = normalizeLabel({
+    frame_scope: getChecked('scope'),
     is_bidirectional: getChecked('dir'),
     lane_count: getChecked('lane')
-  };
+  });
+  state.labels[rel] = next;
 }
 
 async function saveLabels() {
@@ -145,7 +184,7 @@ document.getElementById('prevBtn').addEventListener('click', prev);
 document.getElementById('nextBtn').addEventListener('click', next);
 document.getElementById('saveBtn').addEventListener('click', saveLabels);
 
-document.querySelectorAll('input[name="dir"],input[name="lane"]').forEach(el => {
+document.querySelectorAll('input[name="scope"],input[name="dir"],input[name="lane"]').forEach(el => {
   el.addEventListener('change', () => {
     updateLabel();
     render();
