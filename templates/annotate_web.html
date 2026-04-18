@@ -59,14 +59,11 @@
         <legend>总车道数</legend>
         <label><input type="radio" name="lane" value="1">1</label>
         <label><input type="radio" name="lane" value="2">2</label>
-        <label><input type="radio" name="lane" value="3">3</label>
-        <label><input type="radio" name="lane" value="4">4</label>
-        <label><input type="radio" name="lane" value="5">5</label>
-        <label><input type="radio" name="lane" value="6+">6+</label>
+        <label><input type="radio" name="lane" value="2+">2+</label>
         <label><input type="radio" name="lane" value="unknown">unknown (0)</label>
       </fieldset>
       <p class="hint">规则：当 frame_scope != slope 时，is_bidirectional 与 lane_count 自动归一化为 unknown。</p>
-      <p class="hint">快捷键：←/A 上一张，→/D 下一张，B/N/U 设置双向，1-6 设置车道（6=6+），0=unknown，Ctrl/Cmd+S 保存。</p>
+      <p class="hint">快捷键：←/A 上一张，→/D 下一张，B/N/U 设置双向，1=1车道，2=2车道，3=2+车道，0=unknown，Ctrl/Cmd+S 保存。</p>
     </div>
   </div>
 
@@ -101,7 +98,7 @@ function getMeta(rel) {
 function normalizeLabel(v) {
   const scope = ['slope', 'transition', 'non_slope', 'unknown'].includes(v.frame_scope) ? v.frame_scope : 'unknown';
   let dir = ['yes', 'no', 'unknown'].includes(v.is_bidirectional) ? v.is_bidirectional : 'unknown';
-  let lane = ['1', '2', '3', '4', '5', '6+', 'unknown'].includes(v.lane_count) ? v.lane_count : 'unknown';
+  let lane = ['1', '2', '2+', 'unknown'].includes(v.lane_count) ? v.lane_count : 'unknown';
   if (scope !== 'slope') {
     dir = 'unknown';
     lane = 'unknown';
@@ -203,8 +200,8 @@ window.addEventListener('keydown', async (e) => {
   if (key === 'b') { byName('dir', 'yes'); updateLabel(); render(); return; }
   if (key === 'n') { byName('dir', 'no'); updateLabel(); render(); return; }
   if (key === 'u') { byName('dir', 'unknown'); updateLabel(); render(); return; }
-  if ('12345'.includes(key)) { byName('lane', key); updateLabel(); render(); return; }
-  if (key === '6') { byName('lane', '6+'); updateLabel(); render(); return; }
+  if (key === '1' || key === '2') { byName('lane', key); updateLabel(); render(); return; }
+  if (key === '3') { byName('lane', '2+'); updateLabel(); render(); return; }
   if (key === '0') { byName('lane', 'unknown'); updateLabel(); render(); return; }
 });
 

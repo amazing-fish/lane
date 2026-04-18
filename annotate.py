@@ -5,7 +5,7 @@ annotate.py - 关键帧标注工具 (Tkinter)
   - 图片浏览 (左右键翻页)
   - 标注: frame_scope / is_bidirectional / lane_count
   - 保存/加载 csv（兼容旧 schema）
-  - 快捷键: ←→翻页, b/n=双向yes/no, u=unknown, 1-6=车道数, Ctrl+S=保存
+  - 快捷键: ←→翻页, b/n=双向yes/no, u=unknown, 1/2/3=车道数(3=2+), Ctrl+S=保存
 
 输出 schema:
   image_path,clip_id,frame_idx,frame_scope,is_bidirectional,lane_count
@@ -23,7 +23,7 @@ from PIL import Image, ImageTk
 
 VALID_SCOPE = {"slope", "transition", "non_slope", "unknown"}
 VALID_DIR = {"yes", "no", "unknown"}
-VALID_LANE = {"1", "2", "3", "4", "5", "6+", "unknown"}
+VALID_LANE = {"1", "2", "2+", "unknown"}
 
 
 class AnnotationTool:
@@ -73,7 +73,7 @@ class AnnotationTool:
 
         tk.Label(ctrl, text="总车道数: ").grid(row=2, column=0, sticky="w")
         self.lane_var = tk.StringVar(value="unknown")
-        lane_options = [("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5"), ("6+", "6+"), ("未知", "unknown")]
+        lane_options = [("1", "1"), ("2", "2"), ("2+", "2+"), ("未知", "unknown")]
         for i, (text, val) in enumerate(lane_options):
             tk.Radiobutton(ctrl, text=text, variable=self.lane_var, value=val,
                            command=self._on_label_change).grid(row=2, column=i + 1, padx=3)
@@ -93,7 +93,7 @@ class AnnotationTool:
         root.bind("b", lambda e: self._set_dir("yes"))
         root.bind("n", lambda e: self._set_dir("no"))
         root.bind("u", lambda e: self._set_dir("unknown"))
-        for k in "123456":
+        for k in "123":
             root.bind(k, lambda e, v=k: self._set_lane(v))
         root.bind("<Control-s>", lambda e: self._save())
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -183,7 +183,7 @@ class AnnotationTool:
         self._on_label_change()
 
     def _set_lane(self, val):
-        self.lane_var.set(val if val != "6" else "6+")
+        self.lane_var.set("2+" if val == "3" else val)
         self._on_label_change()
 
     def _prev(self):

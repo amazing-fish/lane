@@ -5,7 +5,7 @@ model.py - ConvNeXt-T + Snippet 时序聚合 + Attention MIL + 双头分类
   1. ConvNeXt-Tiny 提取单帧特征
   2. Snippet 内 1D temporal conv 聚合
   3. Attention MIL 聚合所有 snippet -> clip 级特征
-  4. 双头输出: is_bidirectional (2类), lane_count (6类)
+  4. 双头输出: is_bidirectional (2类), lane_count (3类: 1/2/2+)
 """
 
 import torch
@@ -138,7 +138,7 @@ class LaneMVPModel(nn.Module):
 
         # 双头输出
         direction_logits = self.direction_head(clip_feat)      # (B, 2)
-        lane_count_logits = self.lane_count_head(clip_feat)    # (B, 6)
+        lane_count_logits = self.lane_count_head(clip_feat)    # (B, num_lane_classes)
 
         return {
             "direction_logits": direction_logits,

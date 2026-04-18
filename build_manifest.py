@@ -14,7 +14,7 @@ from collections import defaultdict
 import yaml
 
 DIRECTION_MAP = {"yes": 1, "no": 0, "unknown": -1}
-LANE_MAP = {"1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6+": 5, "unknown": -1}
+LANE_MAP = {"1": 0, "2": 1, "2+": 2, "unknown": -1}
 
 
 def safe_int(value, default):

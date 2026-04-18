@@ -15,7 +15,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 VALID_SCOPE = {"slope", "transition", "non_slope", "unknown"}
 VALID_DIR = {"yes", "no", "unknown"}
-VALID_LANE = {"1", "2", "3", "4", "5", "6+", "unknown"}
+VALID_LANE = {"1", "2", "2+", "unknown"}
 
 
 def collect_images(keyframe_dir):
