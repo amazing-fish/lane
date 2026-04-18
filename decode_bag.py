@@ -668,6 +668,7 @@ def decode_bag_ros1(
     gray_ratio_max=0.92,
     saturation_mean_min=16.0,
     luma_std_min=8.0,
+    progress_position=0,
 ):
     """从 ROS1 bag 导出图像帧."""
     rosbag = _try_import_rosbag()
@@ -705,8 +706,14 @@ def decode_bag_ros1(
     phase_locked = not bool(frame_phase_probe_enabled)
     main_error = None
     try:
-        for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
-                              total=msg_count, desc=f"ROS1 {Path(bag_path).name}"):
+        for _, msg, t in tqdm(
+            bag.read_messages(topics=[topic]),
+            total=msg_count,
+            desc=f"ROS1 {Path(bag_path).name}",
+            position=max(0, int(progress_position)),
+            leave=True,
+            dynamic_ncols=True,
+        ):
             if max_frames and frame_idx >= max_frames:
                 break
             img = decode_image_msg(msg)
@@ -810,6 +817,7 @@ def decode_bag_ros2(
     gray_ratio_max=0.92,
     saturation_mean_min=16.0,
     luma_std_min=8.0,
+    progress_position=0,
 ):
     """从 ROS2 bag 导出图像帧."""
     Ros2Reader, deserialize_cdr = _try_import_rosbags()
@@ -850,8 +858,13 @@ def decode_bag_ros2(
             if not connections:
                 raise ValueError(f"Topic {topic} not found in bag")
             conn = connections[0]
-            for _, timestamp, rawdata in tqdm(reader.messages(connections=[conn]),
-                                              desc=f"ROS2 {Path(bag_path).name}"):
+            for _, timestamp, rawdata in tqdm(
+                reader.messages(connections=[conn]),
+                desc=f"ROS2 {Path(bag_path).name}",
+                position=max(0, int(progress_position)),
+                leave=True,
+                dynamic_ncols=True,
+            ):
                 if max_frames and frame_idx >= max_frames:
                     break
                 msg = deserialize_cdr(rawdata, conn.msgtype)
@@ -944,7 +957,7 @@ def detect_bag_type(bag_path):
     return "unknown"
 
 
-def decode_single_bag(bag_path, output_dir, cfg):
+def decode_single_bag(bag_path, output_dir, cfg, progress_position=0):
     """解码单个 bag，自动检测格式，返回帧索引."""
     t0 = time.perf_counter()
     bag_path = Path(bag_path)
@@ -1042,6 +1055,7 @@ def decode_single_bag(bag_path, output_dir, cfg):
             gray_ratio_max,
             saturation_mean_min,
             luma_std_min,
+            progress_position,
         )
     else:
         rows = decode_bag_ros2(
@@ -1068,6 +1082,7 @@ def decode_single_bag(bag_path, output_dir, cfg):
             gray_ratio_max,
             saturation_mean_min,
             luma_std_min,
+            progress_position,
         )
     rows, packet_stats = rows
 
@@ -1092,8 +1107,8 @@ def decode_single_bag(bag_path, output_dir, cfg):
     }
 
 
-def _decode_single_bag_worker(bag_path, output_dir, cfg):
-    return decode_single_bag(bag_path, output_dir, cfg)
+def _decode_single_bag_worker(bag_path, output_dir, cfg, progress_position):
+    return decode_single_bag(bag_path, output_dir, cfg, progress_position=progress_position)
 
 
 def main():
@@ -1134,13 +1149,20 @@ def main():
     if bag_workers == 1 or len(bag_files) == 1:
         for bag_path in bag_files:
             print(f"\n处理: {bag_path}")
-            report = decode_single_bag(bag_path, output_dir, cfg)
+            report = decode_single_bag(bag_path, output_dir, cfg, progress_position=0)
             summary.append(report)
     else:
-        with ProcessPoolExecutor(max_workers=min(bag_workers, len(bag_files))) as ex:
+        worker_count = min(bag_workers, len(bag_files))
+        with ProcessPoolExecutor(max_workers=worker_count) as ex:
             fut_to_bag = {
-                ex.submit(_decode_single_bag_worker, str(bag_path), output_dir, cfg): bag_path
-                for bag_path in bag_files
+                ex.submit(
+                    _decode_single_bag_worker,
+                    str(bag_path),
+                    output_dir,
+                    cfg,
+                    idx % worker_count,
+                ): bag_path
+                for idx, bag_path in enumerate(bag_files)
             }
             for fut in as_completed(fut_to_bag):
                 bag_path = fut_to_bag[fut]

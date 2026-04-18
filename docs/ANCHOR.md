@@ -416,15 +416,41 @@
 - ROS1/ROS2 行为一致，索引结构不变，仅输出帧质量提升。
 - 启用探测时，解码汇总可见 `phase_probe_frames/phase_probe_hits/sample_phase`，用于校验起始相位判断结果。
 
+## 1.21) 技术路径锚点（issue24-bugfix）
+
+### 问题定义
+- **issue24**：多 bag 并行解码时，多个 worker 的 `tqdm` 进度条会在同一控制台行轮流覆盖，无法同时观察各 worker 的实时进度。
+
+### 修复策略（固定路径）
+1. 在 `decode_bag_ros1/decode_bag_ros2` 增加 `progress_position` 参数，并传递给 `tqdm(position=...)`。
+2. 在 `main()` 的 `ProcessPoolExecutor` 分发阶段，为每个 worker 分配固定行位（`idx % worker_count`）。
+3. 单 bag 串行模式固定使用 `position=0`，保持历史输出兼容。
+4. README 同步补充“bag 级并行时进度条按 worker 固定行位展示”，防止文档与实现漂移。
+
+### 验收标准
+- `bag_workers>1` 时，控制台可同时显示多行进度条，不再在一行内反复覆盖。
+- 串行模式输出行为保持兼容。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.7 -> v0.6.8`。
+- 使用 `v主.次.修`，本次为 **refactor**：`v0.6.9 -> v0.6.10`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.6.10] - refactor
+- 按版本段压缩历史日志：将 `v0.1.x ~ v0.5.x` 改为分段摘要，降低文档冗余并保留演进脉络。
+- 不变更代码行为，仅优化 Anchor 可读性与维护成本。
+- 版本升级到 `v0.6.10`。
+
+## [v0.6.9] - bugfix
+- 修复多 bag 并行解码时进度条同一行覆盖的问题：ROS1/ROS2 `tqdm` 新增固定 `position` 行位。
+- 进程池分发按 worker 固定行位（`idx % worker_count`），并保持串行模式 `position=0` 兼容行为。
+- README 同步补充并行进度条展示语义。
+- 版本升级到 `v0.6.9`。
 
 ## [v0.6.8] - bugfix
 - 调整异常帧方案为“前几帧探测相位 + 固定相位抽样”：通过 `frame_phase_probe_enabled/frame_phase_probe_frames` 判断从哪一帧开始正常。
@@ -482,121 +508,25 @@
 - README/config 同步新增 `h265_decoder_mode` 说明与推荐组合。
 - 版本升级到 `v0.6.0`。
 
-## [v0.5.0] - feature
-- `decode_bag.py` 新增 bag 级多进程并行参数 `decode.bag_workers`，并在 `main()` 层支持多 bag 并发处理。
-- 新增解码 profiling 汇总：单 bag `elapsed_sec/fps_out`，以及 H.265 packet 的 `packet_total/packet_decode_attempts/packet_decode_success/ffmpeg_calls` 等指标。
-- H.265 packet 路径新增冷却策略 `decode.h265_decode_cooldown_packets`，在连续失败场景下减少高频 ffmpeg 调用与回退开销。
-- README 与 `config.yaml` 明确并发分层（bag 级并行 vs 单 bag 内并发）及推荐参数组合。
-- 车道数标签空间由 `1,2,3,4,5,6+` 收敛为 `1,2,2+`，并同步到标注、数据映射、推理与配置。
-- 版本升级到 `v0.5.0`。
+## [v0.5.x] - 历史压缩（feature）
+- 建立多 bag 并行与 profiling 框架：引入 `bag_workers`、单 bag 耗时/FPS 与 packet 统计。
+- 引入 H.265 冷却策略，降低异常流高频 ffmpeg 回退开销。
+- 同步收敛 lane 标签空间到 `1/2/2+`，并更新标注/推理/配置说明。
 
-## [v0.4.1] - bugfix
-- `build_manifest.py` 增加脏值容错（`safe_int`）与字符串归一化（`strip/lower`），避免 CSV 异常值导致生成中断。
-- `dataset.py` 增加 `clip_dir` 存在性检查，缺失目录时告警并返回空帧，避免训练时直接异常退出。
-- `infer.py` 增强 manifest 兼容：支持缺失 `end_frame` 时由 `frame_count` 回退计算区间，并增加参数有效性校验与空路径过滤。
-- 版本升级到 `v0.4.1`。
+## [v0.4.x] - 历史压缩（feature+bugfix）
+- 从 clip 级切换到 segment 级闭环：标注 schema 升级、manifest 生成、区间训练与区间推理打通。
+- 补齐脏值容错与兼容兜底：`safe_int`、缺失目录降级告警、manifest 缺字段回退逻辑。
 
-## [v0.4.0] - feature
-- 新增 segment 级数据闭环：增加 `build_manifest.py`，从 `segment_labels.csv` 自动生成 train/val manifest。
-- 标注工具升级到统一新 schema：`image_path,clip_id,frame_idx,frame_scope,is_bidirectional,lane_count`，并对非 `slope` 自动归一化为 `unknown`。
-- 训练数据读取从 clip 级切换为 segment 级：`dataset.py` 仅加载 `[start_frame,end_frame]` 区间帧。
-- `train.py` 输出 segment 样本统计（样本数、平均长度、标签分布）。
-- `infer.py` 支持区间推理与 manifest 批量 segment 推理，并在结果中输出区间字段。
-- `config.yaml` 增加 `segment_label_file/split_by_clip/include_review_segments`。
-- 版本升级到 `v0.4.0`。
+## [v0.3.x] - 历史压缩（feature+bugfix）
+- 解码性能能力建设：异步写盘、多线程/硬件解码参数、机型调参建议。
+- 资源稳定性修复：有界 future 回收、异常路径资源关闭、主异常优先级保护。
 
-## [v0.3.3] - bugfix
-- 修复解码清理阶段异常覆盖主异常的问题：新增 `_safe_close_resources`，统一处理 writer/bag 关闭异常。
-- ROS1/ROS2 解码流程在存在主异常时仅告警清理异常，保证根因异常可见；无主异常时清理失败会显式抛出。
-- 版本升级到 `v0.3.3`。
+## [v0.2.x] - 历史压缩（feature+bugfix）
+- 新增并完善 Web 标注工具（模板化、路径校验、白名单归一化、进度展示）。
+- 打通 H.265 packet 解码链路（payload 提取、单包+上下文回退、topic 回退匹配）。
+- 逐步修正抽样语义：从消息步进演进到成功帧步进，并加入 packet 预热避免 0 帧回归。
 
-## [v0.3.2] - bugfix
-- 修复异步写盘的资源管理问题：`AsyncFrameWriter` 引入有界 in-flight future 回收机制，避免长时解码内存增长。
-- ROS1/ROS2 解码循环增加 `try/finally` 兜底，异常路径下也能正确关闭 bag 句柄与写盘线程池。
-- 版本升级到 `v0.3.2`。
-
-## [v0.3.1] - bugfix
-- 补充高配机器（12C/24T + A4000）解码参数选型说明，明确推荐 CPU+GPU 混合方案。
-- `README.md` 新增硬件选择建议小节，给出 `cuda + write_workers + ffmpeg_threads` 的实践参数范围。
-- `config.yaml` 注释补全对应调参建议，避免实现能力与使用路径漂移。
-- 版本升级到 `v0.3.1`。
-
-## [v0.3.0] - feature
-- 新增解码 CPU 多线程能力：
-  - `decode_bag.py` 引入 `AsyncFrameWriter`，支持异步并发写盘；
-  - `config.yaml` 新增 `decode.write_workers`。
-- 新增解码 GPU/多线程加速能力：
-  - `H265PacketDecoder` 支持 `decode.ffmpeg_threads` 与 `decode.ffmpeg_hwaccel`；
-  - 硬件加速失败自动回退 CPU，避免解码中断。
-- README 补充新增参数说明，版本升级到 `v0.3.0`。
-
-## [v0.2.6] - bugfix
-- 修复 `decode_bag.py` 的步进抽样语义：由“消息步进”改为“成功解码帧步进”。
-- H.265 packet 流改为持续参与解码链路，仅在步进命中时落盘，避免抽样后出现“全部不可用帧”。
-- ROS1 / ROS2 解码路径统一为相同步进策略。
-- `config.yaml` 与 README 同步更新 `decode.frame_step` 语义说明。
-- 版本升级到 `v0.2.6`。
-
-## [v0.2.5] - bugfix
-- 修复 H.265 packet 流在 `decode.frame_step>1` 下的解码回归：非采样点不再直接丢弃，而是预热 packet 上下文缓存。
-- 采样点继续按“单包 + 上下文拼接回退”解码，避免出现 `0 帧 [failed]`。
-- ROS1 / ROS2 两条解码链路统一引入 packet buffer 预热策略。
-- README 同步补充步进抽样与 H.265 上下文保留说明。
-- 版本升级到 `v0.2.5`。
-
-## [v0.2.4] - bugfix
-- 新增 `decode.frame_step` 配置项，默认值为 `5`，解码阶段按“每 5 帧取 1 帧”步进处理，降低异常帧落盘比例。
-- `decode_bag.py` 的 ROS1/ROS2 解码流程统一接入步进过滤逻辑，并对 `frame_step` 做最小值兜底。
-- README 同步默认解码步进说明，避免实现与文档漂移。
-- 版本升级到 `v0.2.4`。
-
-## [v0.2.3] - bugfix
-- 按 issue7 跟进意见，`config.yaml` 的 `decode.front_camera_topics` 调整为仅保留 `/cam_1 ~ /cam_14`，去除历史冗余 topic。
-- README 与 Anchor 同步更新默认 topic 说明。
-- 版本升级到 `v0.2.3`。
-
-## [v0.2.2] - bugfix
-- 修复 `decode_bag.py` 对 H.265 包消息（如 `/cam_1` + `raw_data`）的兼容性缺口：
-  - 增加 packet payload 提取与 ffmpeg(H.265/HEVC) 解码路径；
-  - 支持“单包解码 + 多包上下文拼接回退”；
-  - 扩展前视 topic 回退匹配关键词。
-- `config.yaml` 增加默认 topic `/cam_1` 与参数 `decode.h265_context_packets`。
-- README 同步新增 H.265 包解码说明。
-- 版本升级到 `v0.2.2`。
-
-## [v0.2.1] - bugfix
-- 根据 issue3 review 调整 Web 标注工具实现：
-  - 前端页面拆分为模板文件 `templates/annotate_web.html`，降低 Python 内嵌 HTML 维护成本。
-  - 加强图片路由目录边界校验，避免路径穿越。
-  - 增加标签白名单归一化，非法值回退 `unknown`。
-  - 新增“已标注/总数”进度展示。
-- 版本升级到 `v0.2.1`。
-
-## [v0.2.0] - feature
-- 新增 `annotate_web.py`：轻量本地 Web 关键帧标注页面（Flask + 单页 HTML）。
-- 支持图片浏览、进度展示、双向与车道标注、CSV 保存、键盘快捷键。
-- 输出 CSV 与原工具兼容：`image_path,is_bidirectional,lane_count`。
-- README 新增 Web 标注页启动说明与快捷键说明。
-- 版本升级到 `v0.2.0`。
-
-## [v0.1.4] - bugfix
-- 移除训练增强中的 `RandomHorizontalFlip`，避免左右翻转破坏道路拓扑语义。
-- 训练 baseline 增强策略固定为：`Resize + ColorJitter + Normalize`。
-- README 同步增强策略说明，避免实现与文档漂移。
-- 版本升级到 `v0.1.4`。
-
-## [v0.1.3] - bugfix
-- 加强 `AttentionMIL` 的 mask 处理：
-  - 增加 `(B, N)` 形状校验，避免调用方传错维度后静默训练。
-  - 使用“masked softmax + 乘 mask + 重归一化”，保证全无效时无 NaN。
-- `LaneMVPModel.forward` 增加默认全 `True` masks 逻辑，统一接口并保持向后兼容。
-- 版本升级到 `v0.1.3`。
-
-## [v0.1.2] - bugfix
-- 推理路径 `infer.py` 显式传入 `masks`，与训练/验证保持一致，避免调用链分叉。
-- 版本升级到 `v0.1.2`。
-
-## [v0.1.1] - bugfix
-- 修复 Attention MIL 未屏蔽 padding snippet 的问题。
-- 训练/验证显式传入 `masks`，确保与 `collate_fn` 产物一致。
-- 新增版本文件 `VERSION` 与本 Anchor 文档，锁定技术路径与日志。
+## [v0.1.x] - 历史压缩（bugfix）
+- 修复 Attention MIL 对 padding 未屏蔽的问题，训练/验证/推理统一 `masks` 语义。
+- 增强 mask 鲁棒性（形状校验、全无效防 NaN）并保持向后兼容。
+- 移除高风险左右翻转增强，固定低风险 baseline 增强策略。

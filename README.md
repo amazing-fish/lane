@@ -1,6 +1,6 @@
 # lane
 
-- 当前版本：`v0.6.5`（见 `VERSION`）。
+- 当前版本：`v0.6.10`（见 `VERSION`）。
 - 技术路径与修改日志锚点：`docs/ANCHOR.md`。
 - 当前主任务：**segment（坡道区间）级属性识别**（不再以整 clip 作为训练样本单位）。
 
@@ -43,6 +43,7 @@ python decode_bag.py --config config.yaml --bag_dir ./data/bags --output_dir ./d
 - **bag 级并行（多进程）**：`decode.bag_workers`
   - 作用在 `main()`，多个 bag 可并行处理。
   - 默认 `1`，保持历史串行行为兼容。
+  - 控制台进度条按 worker 固定行位展示，避免多进程输出在同一行来回覆盖。
 - **单 bag 内写盘并发（多线程）**：`decode.write_workers`
   - 仅用于异步写图，降低主链路写盘阻塞。
 - **单 bag 内 ffmpeg 解码并发**：`decode.ffmpeg_threads`
