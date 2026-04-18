@@ -24,6 +24,7 @@ from PIL import Image, ImageTk
 VALID_SCOPE = {"slope", "transition", "non_slope", "unknown"}
 VALID_DIR = {"yes", "no", "unknown"}
 VALID_LANE = {"1", "2", "2+", "unknown"}
+LEGACY_LANE_TO_NEW = {"3": "2+", "4": "2+", "5": "2+", "6+": "2+"}
 
 
 class AnnotationTool:
@@ -112,7 +113,8 @@ class AnnotationTool:
     def _normalize_label(self, label):
         scope = label.get("frame_scope", "unknown")
         direction = label.get("is_bidirectional", "unknown")
-        lane = label.get("lane_count", "unknown")
+        lane = str(label.get("lane_count", "unknown")).strip().lower()
+        lane = LEGACY_LANE_TO_NEW.get(lane, lane)
 
         if scope not in VALID_SCOPE:
             scope = "unknown"

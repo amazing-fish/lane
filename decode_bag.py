@@ -396,6 +396,9 @@ class H265PacketDecoder:
         img, err = _attempt_once(stream_bytes)
         if err == "feed_only":
             return None
+        # timeout 是“当前packet尚未形成完整可输出帧”的常见情形，不应重启并丢失解码上下文
+        if err == "timeout":
+            return None
         if img is not None:
             return img
 

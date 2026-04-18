@@ -16,6 +16,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 VALID_SCOPE = {"slope", "transition", "non_slope", "unknown"}
 VALID_DIR = {"yes", "no", "unknown"}
 VALID_LANE = {"1", "2", "2+", "unknown"}
+LEGACY_LANE_TO_NEW = {"3": "2+", "4": "2+", "5": "2+", "6+": "2+"}
 
 
 def collect_images(keyframe_dir):
@@ -42,7 +43,8 @@ def normalize_label(val):
         val = {}
     frame_scope = val.get("frame_scope", "unknown")
     direction = val.get("is_bidirectional", "unknown")
-    lane = val.get("lane_count", "unknown")
+    lane = str(val.get("lane_count", "unknown")).strip().lower()
+    lane = LEGACY_LANE_TO_NEW.get(lane, lane)
 
     if frame_scope not in VALID_SCOPE:
         frame_scope = "unknown"

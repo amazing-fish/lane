@@ -15,6 +15,7 @@ import yaml
 
 DIRECTION_MAP = {"yes": 1, "no": 0, "unknown": -1}
 LANE_MAP = {"1": 0, "2": 1, "2+": 2, "unknown": -1}
+LEGACY_LANE_TO_NEW = {"3": "2+", "4": "2+", "5": "2+", "6+": "2+"}
 
 
 def safe_int(value, default):
@@ -29,6 +30,7 @@ def normalize_segment_row(row):
     quality = str(row.get("quality", "unknown") or "unknown").strip().lower()
     direction = str(row.get("is_bidirectional", "unknown") or "unknown").strip().lower()
     lane = str(row.get("lane_count", "unknown") or "unknown").strip().lower()
+    lane = LEGACY_LANE_TO_NEW.get(lane, lane)
 
     if segment_type != "slope":
         direction = "unknown"

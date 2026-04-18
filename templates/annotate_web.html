@@ -98,7 +98,10 @@ function getMeta(rel) {
 function normalizeLabel(v) {
   const scope = ['slope', 'transition', 'non_slope', 'unknown'].includes(v.frame_scope) ? v.frame_scope : 'unknown';
   let dir = ['yes', 'no', 'unknown'].includes(v.is_bidirectional) ? v.is_bidirectional : 'unknown';
-  let lane = ['1', '2', '2+', 'unknown'].includes(v.lane_count) ? v.lane_count : 'unknown';
+  const laneRaw = String(v.lane_count || 'unknown').trim().toLowerCase();
+  const legacyLaneMap = { '3': '2+', '4': '2+', '5': '2+', '6+': '2+' };
+  const laneNorm = legacyLaneMap[laneRaw] || laneRaw;
+  let lane = ['1', '2', '2+', 'unknown'].includes(laneNorm) ? laneNorm : 'unknown';
   if (scope !== 'slope') {
     dir = 'unknown';
     lane = 'unknown';

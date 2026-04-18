@@ -16,6 +16,13 @@ import yaml
 
 DIRECTION_MAP = {"yes": 1, "no": 0, "unknown": -1}
 LANE_MAP = {"1": 0, "2": 1, "2+": 2, "unknown": -1}
+LEGACY_LANE_TO_NEW = {"3": "2+", "4": "2+", "5": "2+", "6+": "2+"}
+
+
+def normalize_lane_label(raw):
+    lane = str(raw or "unknown").strip().lower()
+    lane = LEGACY_LANE_TO_NEW.get(lane, lane)
+    return lane if lane in LANE_MAP else "unknown"
 
 
 def load_clip_labels(clip_label_file):
@@ -29,7 +36,7 @@ def load_clip_labels(clip_label_file):
             clip = row["clip"]
             labels[clip] = {
                 "is_bidirectional": DIRECTION_MAP.get(row.get("is_bidirectional", "unknown"), -1),
-                "lane_count": LANE_MAP.get(row.get("lane_count", "unknown"), -1),
+                "lane_count": LANE_MAP.get(normalize_lane_label(row.get("lane_count", "unknown")), -1),
             }
     return labels
 
@@ -49,7 +56,7 @@ def load_keyframe_labels(kf_label_file):
             labels[clip].append({
                 "image_path": path,
                 "is_bidirectional": DIRECTION_MAP.get(row.get("is_bidirectional", "unknown"), -1),
-                "lane_count": LANE_MAP.get(row.get("lane_count", "unknown"), -1),
+                "lane_count": LANE_MAP.get(normalize_lane_label(row.get("lane_count", "unknown")), -1),
             })
     return labels
 
