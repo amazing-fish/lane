@@ -4,11 +4,14 @@ data:
   bag_dir: "./data/bags"
   output_dir: "./data/frames"
   keyframe_dir: "./data/keyframes"
-  clip_label_file: "./data/clip_labels.csv"
+  clip_label_file: "./data/clip_labels.csv"   # 兼容保留，不再是主输入
+  segment_label_file: "./data/segment_labels.csv"
   keyframe_label_file: "./data/keyframe_labels.csv"
   train_manifest: "./data/train_manifest.csv"
   val_manifest: "./data/val_manifest.csv"
   val_ratio: 0.2
+  split_by_clip: true
+  include_review_segments: false
 
 decode:
   front_camera_topics:

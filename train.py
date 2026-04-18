@@ -18,7 +18,9 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, classification_report
 import yaml
 
-from dataset import LaneClipDataset, collate_fn
+from collections import Counter
+
+from dataset import LaneSegmentDataset, collate_fn
 from model import build_model
 
 
@@ -147,13 +149,27 @@ def main():
     print(f"Device: {device}")
 
     # 数据
-    train_ds = LaneClipDataset(cfg["data"]["train_manifest"], cfg, is_train=True)
-    val_ds = LaneClipDataset(cfg["data"]["val_manifest"], cfg, is_train=False)
+    train_ds = LaneSegmentDataset(cfg["data"]["train_manifest"], cfg, is_train=True)
+    val_ds = LaneSegmentDataset(cfg["data"]["val_manifest"], cfg, is_train=False)
     train_loader = DataLoader(train_ds, batch_size=tcfg["batch_size"], shuffle=True,
                               num_workers=tcfg["num_workers"], collate_fn=collate_fn, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=tcfg["batch_size"], shuffle=False,
                             num_workers=tcfg["num_workers"], collate_fn=collate_fn, pin_memory=True)
-    print(f"Train: {len(train_ds)}, Val: {len(val_ds)}")
+    print(f"Train segments: {len(train_ds)}, Val segments: {len(val_ds)}")
+
+    def _dataset_stats(ds, name):
+        if not ds.samples:
+            print(f"[{name}] 空数据集")
+            return
+        lengths = [max(0, s["end_frame"] - s["start_frame"] + 1) for s in ds.samples]
+        dir_cnt = Counter(s["is_bidirectional"] for s in ds.samples)
+        lane_cnt = Counter(s["lane_count"] for s in ds.samples)
+        print(f"[{name}] segment数={len(ds.samples)}, 平均segment长度={sum(lengths)/len(lengths):.2f}帧")
+        print(f"[{name}] is_bidirectional分布={dict(sorted(dir_cnt.items()))}")
+        print(f"[{name}] lane_count分布={dict(sorted(lane_cnt.items()))}")
+
+    _dataset_stats(train_ds, "train")
+    _dataset_stats(val_ds, "val")
 
     # 模型
     model = build_model(cfg).to(device)

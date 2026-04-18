@@ -224,15 +224,72 @@
 - 清理阶段异常在“无主异常”情况下可被显式抛出。
 - 解码路径输出结构保持兼容。
 
+
+## 1.12) 技术路径锚点（issue15）
+
+### 问题定义
+- 当前流程按整 clip 训练，但标签仅在 clip 内的坡道子区间成立，导致监督噪声。
+- keyframe 标注无法表达 `non_slope/transition`，无法形成 segment 级数据闭环。
+
+### 修复策略（固定路径）
+1. 升级 `annotate.py` 与 `annotate_web.py` schema，新增 `frame_scope`，并补齐 `clip_id/frame_idx`。
+2. 统一标注归一化规则：`frame_scope != slope` 时，`is_bidirectional/lane_count` 强制为 `unknown`。
+3. 新增 `build_manifest.py`：从 `segment_labels.csv` 自动生成 `train_manifest.csv/val_manifest.csv`。
+4. `dataset.py` 从 manifest 读取 `start_frame/end_frame`，仅加载 segment 区间帧。
+5. `train.py` 适配 segment manifest 并输出基础统计日志（样本数、平均长度、标签分布）。
+6. `infer.py` 改为 segment 级推理：支持 `--clip_dir + --start_frame + --end_frame` 与 `--manifest` 批量。
+7. `config.yaml` 增加 `segment_label_file/split_by_clip/include_review_segments`，并保留 `clip_label_file` 兼容。
+
+### 验收标准
+- 标注工具可输出新 schema，且兼容旧 CSV。
+- `build_manifest.py` 仅输出 `segment_type=slope` 样本并按 `clip_id` 切分。
+- 训练与推理均按 segment 区间读帧，不再默认读取整 clip。
+
+
+## 1.13) 技术路径锚点（issue16）
+
+### 问题定义
+- review 发现 segment 闭环首版在鲁棒性与兼容性上仍有边界风险：
+  - `build_manifest.py` 对脏值（空串/非法数字/大小写）容错不足，可能 `int()` 失败中断。
+  - `dataset.py` 在 `clip_dir` 缺失时直接 `os.listdir` 会抛异常。
+  - `infer.py` 读取 manifest 时对缺失 `end_frame` 的兼容不充分。
+
+### 修复策略（固定路径）
+1. `build_manifest.py` 增加 `safe_int`，并对 `segment_type/quality/is_bidirectional/lane_count` 做 `strip+lower` 归一化。
+2. `dataset.py` 的 `_load_frame_list` 增加 `clip_dir` 可访问性检查，异常路径降级为告警并返回空帧。
+3. `infer.py` 增加 `safe_int` 与 `manifest_row_to_segment`：
+   - 若无 `end_frame` 则回退到 `start_frame + frame_count - 1`；
+   - 增加 `start/end` 参数校验与空 `clip_dir` 行过滤。
+
+### 验收标准
+- 脏数据不会导致 manifest 生成中断。
+- 训练/推理在缺失目录或缺失字段时可告警降级，不直接崩溃。
+- 版本与修改日志同步到 `v0.4.1`。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.3.2 -> v0.3.3`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.4.0 -> v0.4.1`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.4.1] - bugfix
+- `build_manifest.py` 增加脏值容错（`safe_int`）与字符串归一化（`strip/lower`），避免 CSV 异常值导致生成中断。
+- `dataset.py` 增加 `clip_dir` 存在性检查，缺失目录时告警并返回空帧，避免训练时直接异常退出。
+- `infer.py` 增强 manifest 兼容：支持缺失 `end_frame` 时由 `frame_count` 回退计算区间，并增加参数有效性校验与空路径过滤。
+- 版本升级到 `v0.4.1`。
+
+## [v0.4.0] - feature
+- 新增 segment 级数据闭环：增加 `build_manifest.py`，从 `segment_labels.csv` 自动生成 train/val manifest。
+- 标注工具升级到统一新 schema：`image_path,clip_id,frame_idx,frame_scope,is_bidirectional,lane_count`，并对非 `slope` 自动归一化为 `unknown`。
+- 训练数据读取从 clip 级切换为 segment 级：`dataset.py` 仅加载 `[start_frame,end_frame]` 区间帧。
+- `train.py` 输出 segment 样本统计（样本数、平均长度、标签分布）。
+- `infer.py` 支持区间推理与 manifest 批量 segment 推理，并在结果中输出区间字段。
+- `config.yaml` 增加 `segment_label_file/split_by_clip/include_review_segments`。
+- 版本升级到 `v0.4.0`。
 
 ## [v0.3.3] - bugfix
 - 修复解码清理阶段异常覆盖主异常的问题：新增 `_safe_close_resources`，统一处理 writer/bag 关闭异常。
