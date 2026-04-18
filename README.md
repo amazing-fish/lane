@@ -56,6 +56,15 @@ python decode_bag.py --config config.yaml --bag_dir ./data/bags --output_dir ./d
   - `decode.h265_persistent_read_timeout_sec`：persistent 读取 stdout 等待窗口（默认 1.0s）。
 - **H.265 解码降开销策略**：`decode.h265_decode_cooldown_packets`
   - 连续失败后进入冷却，跳过若干 packet 的解码尝试，降低高频 ffmpeg 进程启动/回退开销。
+- **异常帧过滤（大面积灰色）**：
+  - `decode.frame_quality_filter_enabled`: 是否启用异常帧过滤（默认开启）。
+  - `decode.frame_phase_probe_enabled`: 是否启用“前几帧探测相位”（默认开启）。
+  - `decode.frame_phase_probe_frames`: 启动探测窗口上限（默认 `20`）。
+  - `decode.frame_quality_check_interval`: 仅当关闭 `frame_phase_probe_enabled` 时生效；`1` 表示每帧都判，`N` 表示每 `N` 帧判 1 次。
+  - `decode.gray_ratio_max`: 低饱和像素占比上限（默认 `0.92`）。
+  - `decode.saturation_mean_min`: 全图平均饱和度下限（默认 `16.0`）。
+  - `decode.luma_std_min`: 明度标准差下限（默认 `8.0`）。
+  - 默认策略：先用前几帧判别“正常帧起始相位”，锁定后按该相位执行 `frame_step` 抽样。
 
 ### 配置默认生效方式
 
@@ -82,6 +91,16 @@ python decode_bag.py --config config.yaml --bag_dir ./data/bags --output_dir ./d
   - 先降 `bag_workers`（如 `2 -> 1`），再降 `write_workers`。
 - GPU 忙/不稳定时：
   - 先改 `ffmpeg_hwaccel: "auto"`，必要时 `"none"` 回 CPU。
+
+### 当 bag 出现“第 4 帧才正常、每 5 帧正常 1 帧”时
+
+- 保持 `frame_step: 5`（当前默认）用于控制落盘规模。
+- 打开 `frame_phase_probe_enabled: true`（默认已开），让系统先用前几帧自动判断“从哪一帧开始正常”。
+- 探测不稳定时可增大 `frame_phase_probe_frames`（如 `20 -> 30`）。
+- 若你明确不需要“起始相位探测”，可关闭 `frame_phase_probe_enabled`，再用下面三项做持续过滤：
+  - 误杀正常帧：放宽 `gray_ratio_max`（如 `0.92 -> 0.96`），降低 `saturation_mean_min`（如 `16 -> 10`）。
+  - 异常帧漏检：收紧 `gray_ratio_max`（如 `0.92 -> 0.88`），提高 `luma_std_min`（如 `8 -> 12`）。
+- 解码汇总会打印 `phase_probe_frames/phase_probe_hits/sample_phase`，可直观看到探测结果。
 
 ## segment 主真值与 manifest 生成
 

@@ -40,6 +40,13 @@ decode:
   h265_persistent_write_timeout_sec: 1.0  # persistent 写 stdin 超时（秒），避免管道反压卡住
   h265_persistent_read_timeout_sec: 1.0   # persistent 读 stdout 等待窗口（秒），默认较旧实现更宽松
   h265_decode_cooldown_packets: 8  # H.265 连续失败后冷却包数，减少高频 ffmpeg 进程调用
+  frame_quality_filter_enabled: true  # 启用异常帧过滤（大面积灰色/低纹理）
+  frame_quality_check_interval: 1  # 帧质量判别周期：1=每帧判别，N=每N帧判1次
+  frame_phase_probe_enabled: true  # 启用“前几帧探测相位”，自动判断从哪一帧开始正常
+  frame_phase_probe_frames: 20  # 启动探测帧数上限；命中正常帧后会提前锁定相位
+  gray_ratio_max: 0.92            # 低饱和像素占比上限（越小越严格）
+  saturation_mean_min: 16.0       # 全图平均饱和度下限（越大越严格）
+  luma_std_min: 8.0               # 明度标准差下限（越大越严格）
   output_format: "jpg"
   jpeg_quality: 95
   max_frames_per_bag: null  # null = 不限制

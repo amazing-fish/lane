@@ -148,6 +148,64 @@ def extract_packet_payload(msg):
     return None
 
 
+def is_valid_frame(
+    img,
+    enabled=False,
+    gray_ratio_max=0.92,
+    saturation_mean_min=16.0,
+    luma_std_min=8.0,
+):
+    """判断帧是否为“正常可用帧”.
+
+    经验规则（面向“大面积灰色异常帧”）：
+    1) 低饱和像素占比过高（gray_ratio）；
+    2) 全图平均饱和度过低（sat_mean）；
+    3) 明度标准差过低（luma_std，纹理不足）。
+
+    返回: (is_valid, metrics_dict)
+    """
+    if img is None:
+        return False, {
+            "gray_ratio": 1.0,
+            "sat_mean": 0.0,
+            "luma_std": 0.0,
+            "reason": "empty",
+        }
+    if not enabled:
+        return True, {
+            "gray_ratio": 0.0,
+            "sat_mean": 0.0,
+            "luma_std": 0.0,
+            "reason": "disabled",
+        }
+
+    if img.ndim == 2:
+        bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:
+        bgr = img
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1].astype(np.float32)
+    val = hsv[:, :, 2].astype(np.float32)
+
+    # 饱和度阈值可粗略刻画“灰度感”
+    gray_ratio = float((sat <= 12.0).mean())
+    sat_mean = float(sat.mean())
+    luma_std = float(val.std())
+
+    valid = (
+        gray_ratio <= float(gray_ratio_max)
+        and sat_mean >= float(saturation_mean_min)
+        and luma_std >= float(luma_std_min)
+    )
+    reason = "ok" if valid else "gray_or_low_texture"
+    return valid, {
+        "gray_ratio": gray_ratio,
+        "sat_mean": sat_mean,
+        "luma_std": luma_std,
+        "reason": reason,
+    }
+
+
 class H265PacketDecoder:
     """基于 ffmpeg 的 H.265 包解码器（单包 + 上下文拼接回退）."""
 
@@ -603,6 +661,13 @@ def decode_bag_ros1(
     h265_legacy_timeout_sec=15.0,
     h265_persistent_write_timeout_sec=1.0,
     h265_persistent_read_timeout_sec=1.0,
+    frame_quality_filter_enabled=False,
+    frame_quality_check_interval=1,
+    frame_phase_probe_enabled=False,
+    frame_phase_probe_frames=20,
+    gray_ratio_max=0.92,
+    saturation_mean_min=16.0,
+    luma_std_min=8.0,
 ):
     """从 ROS1 bag 导出图像帧."""
     rosbag = _try_import_rosbag()
@@ -628,7 +693,16 @@ def decode_bag_ros1(
     writer = AsyncFrameWriter(max_workers=write_workers)
 
     frame_step = max(1, int(frame_step))
+    frame_quality_check_interval = max(1, int(frame_quality_check_interval))
+    frame_phase_probe_frames = max(1, int(frame_phase_probe_frames))
     decoded_idx = 0
+    quality_idx = 0
+    skipped_bad_frames = 0
+    skipped_quality_checks = 0
+    phase_probe_count = 0
+    phase_probe_hits = 0
+    sample_phase = 0
+    phase_locked = not bool(frame_phase_probe_enabled)
     main_error = None
     try:
         for _, msg, t in tqdm(bag.read_messages(topics=[topic]),
@@ -643,7 +717,44 @@ def decode_bag_ros1(
                     warned_ffmpeg = True
             if img is None:
                 continue
-            if decoded_idx % frame_step != 0:
+
+            # 启动阶段：仅用前若干帧探测“从哪一帧开始正常”，锁定 frame_step 的相位
+            if frame_phase_probe_enabled and not phase_locked:
+                valid, _ = is_valid_frame(
+                    img,
+                    enabled=frame_quality_filter_enabled,
+                    gray_ratio_max=gray_ratio_max,
+                    saturation_mean_min=saturation_mean_min,
+                    luma_std_min=luma_std_min,
+                )
+                phase_probe_count += 1
+                if valid:
+                    phase_probe_hits += 1
+                    sample_phase = decoded_idx % frame_step
+                    phase_locked = True
+                if not phase_locked and phase_probe_count >= frame_phase_probe_frames:
+                    phase_locked = True
+                decoded_idx += 1
+                continue
+
+            do_quality_check = (quality_idx % frame_quality_check_interval == 0)
+            quality_idx += 1
+            if frame_quality_filter_enabled and do_quality_check and not frame_phase_probe_enabled:
+                valid, _ = is_valid_frame(
+                    img,
+                    enabled=frame_quality_filter_enabled,
+                    gray_ratio_max=gray_ratio_max,
+                    saturation_mean_min=saturation_mean_min,
+                    luma_std_min=luma_std_min,
+                )
+            else:
+                valid = True
+                if frame_quality_filter_enabled:
+                    skipped_quality_checks += 1
+            if not valid:
+                skipped_bad_frames += 1
+                continue
+            if decoded_idx % frame_step != sample_phase:
                 decoded_idx += 1
                 continue
             ts = t.to_sec() if hasattr(t, "to_sec") else float(t)
@@ -663,6 +774,11 @@ def decode_bag_ros1(
             print(f"[WARN] 清理阶段出现异常（已保留主异常）: {'; '.join(close_errors)}")
         elif close_errors:
             raise RuntimeError(f"清理阶段异常: {'; '.join(close_errors)}")
+    packet_decoder.stats["skipped_bad_frames"] = skipped_bad_frames
+    packet_decoder.stats["skipped_quality_checks"] = skipped_quality_checks
+    packet_decoder.stats["phase_probe_frames"] = phase_probe_count
+    packet_decoder.stats["phase_probe_hits"] = phase_probe_hits
+    packet_decoder.stats["sample_phase"] = sample_phase
     return index_rows, packet_decoder.stats
 
 
@@ -687,6 +803,13 @@ def decode_bag_ros2(
     h265_legacy_timeout_sec=15.0,
     h265_persistent_write_timeout_sec=1.0,
     h265_persistent_read_timeout_sec=1.0,
+    frame_quality_filter_enabled=False,
+    frame_quality_check_interval=1,
+    frame_phase_probe_enabled=False,
+    frame_phase_probe_frames=20,
+    gray_ratio_max=0.92,
+    saturation_mean_min=16.0,
+    luma_std_min=8.0,
 ):
     """从 ROS2 bag 导出图像帧."""
     Ros2Reader, deserialize_cdr = _try_import_rosbags()
@@ -710,7 +833,16 @@ def decode_bag_ros2(
     writer = AsyncFrameWriter(max_workers=write_workers)
 
     frame_step = max(1, int(frame_step))
+    frame_quality_check_interval = max(1, int(frame_quality_check_interval))
+    frame_phase_probe_frames = max(1, int(frame_phase_probe_frames))
     decoded_idx = 0
+    quality_idx = 0
+    skipped_bad_frames = 0
+    skipped_quality_checks = 0
+    phase_probe_count = 0
+    phase_probe_hits = 0
+    sample_phase = 0
+    phase_locked = not bool(frame_phase_probe_enabled)
     main_error = None
     try:
         with Ros2Reader(bag_path) as reader:
@@ -731,7 +863,42 @@ def decode_bag_ros2(
                         warned_ffmpeg = True
                 if img is None:
                     continue
-                if decoded_idx % frame_step != 0:
+                # 启动阶段：仅用前若干帧探测“从哪一帧开始正常”，锁定 frame_step 的相位
+                if frame_phase_probe_enabled and not phase_locked:
+                    valid, _ = is_valid_frame(
+                        img,
+                        enabled=frame_quality_filter_enabled,
+                        gray_ratio_max=gray_ratio_max,
+                        saturation_mean_min=saturation_mean_min,
+                        luma_std_min=luma_std_min,
+                    )
+                    phase_probe_count += 1
+                    if valid:
+                        phase_probe_hits += 1
+                        sample_phase = decoded_idx % frame_step
+                        phase_locked = True
+                    if not phase_locked and phase_probe_count >= frame_phase_probe_frames:
+                        phase_locked = True
+                    decoded_idx += 1
+                    continue
+                do_quality_check = (quality_idx % frame_quality_check_interval == 0)
+                quality_idx += 1
+                if frame_quality_filter_enabled and do_quality_check and not frame_phase_probe_enabled:
+                    valid, _ = is_valid_frame(
+                        img,
+                        enabled=frame_quality_filter_enabled,
+                        gray_ratio_max=gray_ratio_max,
+                        saturation_mean_min=saturation_mean_min,
+                        luma_std_min=luma_std_min,
+                    )
+                else:
+                    valid = True
+                    if frame_quality_filter_enabled:
+                        skipped_quality_checks += 1
+                if not valid:
+                    skipped_bad_frames += 1
+                    continue
+                if decoded_idx % frame_step != sample_phase:
                     decoded_idx += 1
                     continue
                 ts = timestamp / 1e9  # nanoseconds -> seconds
@@ -751,6 +918,11 @@ def decode_bag_ros2(
             print(f"[WARN] 清理阶段出现异常（已保留主异常）: {'; '.join(close_errors)}")
         elif close_errors:
             raise RuntimeError(f"清理阶段异常: {'; '.join(close_errors)}")
+    packet_decoder.stats["skipped_bad_frames"] = skipped_bad_frames
+    packet_decoder.stats["skipped_quality_checks"] = skipped_quality_checks
+    packet_decoder.stats["phase_probe_frames"] = phase_probe_count
+    packet_decoder.stats["phase_probe_hits"] = phase_probe_hits
+    packet_decoder.stats["sample_phase"] = sample_phase
     return index_rows, packet_decoder.stats
 
 
@@ -791,6 +963,13 @@ def decode_single_bag(bag_path, output_dir, cfg):
     h265_legacy_timeout_sec = cfg["decode"].get("h265_legacy_timeout_sec", 15.0)
     h265_persistent_write_timeout_sec = cfg["decode"].get("h265_persistent_write_timeout_sec", 1.0)
     h265_persistent_read_timeout_sec = cfg["decode"].get("h265_persistent_read_timeout_sec", 1.0)
+    frame_quality_filter_enabled = bool(cfg["decode"].get("frame_quality_filter_enabled", False))
+    frame_quality_check_interval = int(cfg["decode"].get("frame_quality_check_interval", 1))
+    frame_phase_probe_enabled = bool(cfg["decode"].get("frame_phase_probe_enabled", True))
+    frame_phase_probe_frames = int(cfg["decode"].get("frame_phase_probe_frames", 20))
+    gray_ratio_max = float(cfg["decode"].get("gray_ratio_max", 0.92))
+    saturation_mean_min = float(cfg["decode"].get("saturation_mean_min", 16.0))
+    luma_std_min = float(cfg["decode"].get("luma_std_min", 8.0))
 
     # 列出 topic 并匹配前视
     if bag_type == "ros1":
@@ -856,6 +1035,13 @@ def decode_single_bag(bag_path, output_dir, cfg):
             h265_legacy_timeout_sec,
             h265_persistent_write_timeout_sec,
             h265_persistent_read_timeout_sec,
+            frame_quality_filter_enabled,
+            frame_quality_check_interval,
+            frame_phase_probe_enabled,
+            frame_phase_probe_frames,
+            gray_ratio_max,
+            saturation_mean_min,
+            luma_std_min,
         )
     else:
         rows = decode_bag_ros2(
@@ -875,6 +1061,13 @@ def decode_single_bag(bag_path, output_dir, cfg):
             h265_legacy_timeout_sec,
             h265_persistent_write_timeout_sec,
             h265_persistent_read_timeout_sec,
+            frame_quality_filter_enabled,
+            frame_quality_check_interval,
+            frame_phase_probe_enabled,
+            frame_phase_probe_frames,
+            gray_ratio_max,
+            saturation_mean_min,
+            luma_std_min,
         )
     rows, packet_stats = rows
 
@@ -986,7 +1179,12 @@ def main():
                 "packet_decode_skips={packet_decode_skips}, packet_decode_success={packet_decode_success}, "
                 "ffmpeg_calls={ffmpeg_calls}, ffmpeg_hw_fallbacks={ffmpeg_hw_fallbacks}, "
                 "ffmpeg_process_launches={ffmpeg_process_launches}, "
-                "ffmpeg_process_restarts={ffmpeg_process_restarts}".format(**p)
+                "ffmpeg_process_restarts={ffmpeg_process_restarts}, "
+                "skipped_bad_frames={skipped_bad_frames}, "
+                "skipped_quality_checks={skipped_quality_checks}, "
+                "phase_probe_frames={phase_probe_frames}, "
+                "phase_probe_hits={phase_probe_hits}, "
+                "sample_phase={sample_phase}".format(**p)
             )
 
     ok_count = sum(1 for s in summary if s["status"] == "ok")
