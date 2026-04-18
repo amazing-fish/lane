@@ -266,15 +266,152 @@
 - 训练/推理在缺失目录或缺失字段时可告警降级，不直接崩溃。
 - 版本与修改日志同步到 `v0.4.1`。
 
+## 1.14) 技术路径锚点（issue17）
+
+### 问题定义
+- 多 bag 输入时 `decode_bag.py` 仍按 bag 串行处理，CPU/GPU 资源利用率不足。
+- H.265 packet 路径对 ffmpeg 调用频率高，在异常流上存在明显的启动与回退开销。
+- README 对并发层级（bag 级 vs 单 bag 内）说明不够清晰，容易误配。
+- 业务标签空间需要将 `lane_count` 收敛到 `1/2/2+`，以降低标注和建模复杂度。
+
+### 修复策略（固定路径）
+1. 在 `decode_bag.py` 新增 `decode.bag_workers`，在 `main()` 使用 `ProcessPoolExecutor` 做 bag 级并行。
+2. 增加单 bag profiling 输出：耗时、输出帧数、输出 FPS、packet/ffmpeg 调用统计。
+3. 在 `H265PacketDecoder` 增加冷却参数 `decode.h265_decode_cooldown_packets`，连续失败后短暂跳过解码尝试，降低高频 ffmpeg 调用开销。
+4. 保留原单 bag 解码链路和 `write_workers` 行为，默认配置向后兼容（`bag_workers=1`）。
+5. 将 `lane_count` 标签空间统一到 `1/2/2+`：
+   - 标注工具（Tk/Web）白名单与快捷键更新；
+   - 数据映射与推理类别名更新；
+   - 配置 `num_lane_classes` 调整为 `3`。
+6. README 与 config 注释同步：明确并发层级、默认生效方式、推荐参数组合与注意事项。
+
+### 验收标准
+- 多 bag 场景可通过 `bag_workers>1` 获得并行处理能力。
+- 默认配置不传 `bag_workers` 时，行为等价历史串行路径。
+- 汇总日志可见单 bag profiling 与 packet/ffmpeg 统计字段。
+- `lane_count` 相关工具链一致使用 `1/2/2+`（含 `unknown` 兜底）。
+
+## 1.15) 技术路径锚点（issue18）
+
+### 问题定义
+- issue17 中虽优化了 H.265 冷却与统计，但未真正实现“长生命周期 ffmpeg 进程”。
+- 高频 packet 流仍可能触发大量 ffmpeg 子进程创建，进程启动开销与回退成本偏高。
+
+### 修复策略（固定路径）
+1. 在 `H265PacketDecoder` 增加 `decode.h265_decoder_mode`：
+   - `legacy`：保留旧的单次 `subprocess.run` 解码路径；
+   - `persistent`：引入长生命周期 `ffmpeg` 进程（`Popen`），持续从 `stdin` 喂入 HEVC packet。
+2. persistent 模式下通过 `image2pipe + mjpeg` 输出，使用 JPEG 边界（SOI/EOI）从 stdout 流中提取完整帧。
+3. 在 persistent 模式加入异常恢复：
+   - 写入/读取异常时自动重启进程；
+   - 若硬件加速异常，自动降级 CPU 后重启。
+4. 增加进程生命周期 profiling：
+   - `ffmpeg_process_launches`
+   - `ffmpeg_process_restarts`
+5. 保持默认配置可控，支持随时回退到 `legacy`，避免行为漂移。
+
+### 验收标准
+- `h265_decoder_mode=persistent` 时，单 bag 内复用 ffmpeg 进程，不再对每次解码都新起子进程。
+- 发生 pipe 异常时可自动重启并继续解码，且不影响主流程稳定性。
+- README/config/ANCHOR/版本日志同步更新。
+
+## 1.16) 技术路径锚点（issue19-review）
+
+### 问题定义
+- 对 issue18 的深度 review 发现 persistent 实现有两个关键边界风险：
+  1. 冷却期间直接 `return` 会导致 packet 未输入 ffmpeg，破坏码流连续性；
+  2. persistent 模式仍执行“单包 + merged 回退”会向同一 ffmpeg 进程重复喂入历史数据，可能引入时序污染。
+- 此外，persistent 进程将 `stderr` 设为 PIPE 且未消费，长时运行存在阻塞风险。
+
+### 修复策略（固定路径）
+1. persistent 模式下将冷却语义调整为“**feed-only**”：冷却期仍向 ffmpeg 持续喂包，但不取帧。
+2. persistent 模式移除 merged 回退，仅按实时 packet 序列单次解码，避免重复喂历史数据。
+3. persistent 进程 `stderr` 改为 `DEVNULL`，降低管道阻塞风险。
+4. 配置默认值回调为 `h265_decoder_mode=legacy`，保持向后兼容；README 继续给出 persistent 推荐。
+
+### 验收标准
+- persistent 冷却期不丢 packet，码流连续。
+- persistent 模式不再重复写入 merged 数据。
+- 默认配置保持旧行为兼容，显式设置 `persistent` 时启用长生命周期路径。
+
+## 1.17) 技术路径锚点（issue20-review）
+
+### 问题定义
+- issue19 将冷却期改为 feed-only 后，persistent 模式在冷却段不读取 stdout 帧数据。
+- 对高吞吐码流，ffmpeg 仍会持续输出 mjpeg；若长期不消费 stdout，可能触发 pipe 积压并反压到 ffmpeg，造成吞吐下降或阻塞。
+
+### 修复策略（固定路径）
+1. 在 `H265PacketDecoder._decode_stream_persistent` 增加 `_drain_stdout_nonblocking`。
+2. feed-only 路径在写入 packet 后执行非阻塞 drain，定额回收 stdout，避免积压。
+3. feed-only 路径清空并丢弃冷却段输出，避免旧帧污染与缓存增长。
+
+### 验收标准
+- persistent + 冷却场景下 stdout 可持续被回收，不因长时不读造成明显阻塞。
+- feed-only 语义保持不变：冷却期不返回帧，仅维护码流连续性。
+
+## 1.18) 技术路径锚点（issue21-review）
+
+### 问题定义
+- review 指出 persistent 解码路径将 `timeout` 视作致命失败并立即重启 ffmpeg，会丢失跨包解码上下文。
+- 在 HEVC 多包成帧场景，`timeout` 本身是常态；若每次超时都重启，会导致“永远攒不齐上下文”。
+- 另一个 review 点是 lane 标签收敛后未对历史 `3/4/5/6+` 进行映射，旧数据会被静默降为 `unknown`，损失监督信息。
+
+### 修复策略（固定路径）
+1. persistent 模式下将 `timeout` 视作“暂未产出帧”，不重启 ffmpeg，保留解码状态。
+2. 在标注工具、manifest 生成与 legacy 数据读取路径增加 `3/4/5/6+ -> 2+` 映射，保持历史标签可用。
+3. 前端 Web 标注归一化逻辑同步 legacy 映射，避免保存时误降级。
+
+### 验收标准
+- persistent 模式在 timeout miss 后可继续积累 packet 上下文，不出现频繁重启导致的近零出帧。
+- 历史 lane 标签（3/4/5/6+）在新标签体系下自动映射为 `2+`，不再静默丢失监督。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.4.0 -> v0.4.1`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.3 -> v0.6.4`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.6.4] - bugfix
+- 修复 persistent 解码将 `timeout` 误判为致命失败的问题：timeout miss 不再重启 ffmpeg，保留跨包上下文。
+- 新增 legacy lane 映射（`3/4/5/6+ -> 2+`）并同步到 Tk/Web 标注、manifest/prepare 数据路径，避免历史监督被静默降级为 `unknown`。
+- 版本升级到 `v0.6.4`。
+
+## [v0.6.3] - bugfix
+- 进一步修复 persistent feed-only 路径：冷却期改为“清空并丢弃 stdout 输出”而非缓存，避免旧帧污染后续解码结果。
+- 调整非阻塞 drain 的回收上限，降低高码率场景下 stdout 反压阻塞风险。
+- 版本升级到 `v0.6.3`。
+
+## [v0.6.2] - bugfix
+- 修复 persistent feed-only 冷却期的 stdout 积压风险：新增非阻塞 drain 机制，避免 ffmpeg 管道反压阻塞。
+- 对冷却期内部缓存增加上限裁剪，避免长期解码内存增长。（已在 v0.6.3 演进为冷却期直接丢弃输出）
+- 版本升级到 `v0.6.2`。
+
+## [v0.6.1] - bugfix
+- 修复 persistent 模式在冷却期直接丢包的问题：改为 feed-only，保持 ffmpeg 输入连续性。
+- 修复 persistent 模式重复喂 merged 数据的问题：仅按实时 packet 单次解码，不再对同一进程重复注入历史缓存。
+- persistent 进程 `stderr` 改为 `DEVNULL`，降低长时运行的管道阻塞风险。
+- 默认配置回调为 `h265_decoder_mode=legacy` 以保持向后兼容，README 保留 persistent 推荐说明。
+- 版本升级到 `v0.6.1`。
+
+## [v0.6.0] - feature
+- 新增 H.265 长生命周期 ffmpeg 解码模式：`decode.h265_decoder_mode=persistent`。
+- persistent 模式下复用 `ffmpeg` 进程，通过 `image2pipe(mjpeg)` 持续输出并按 JPEG 边界提取帧，减少高频进程启动开销。
+- 增加 persistent 相关统计：`ffmpeg_process_launches`、`ffmpeg_process_restarts`。
+- 异常恢复增强：pipe 读写异常触发进程重启；硬件解码异常时自动降级 CPU 后重启。
+- README/config 同步新增 `h265_decoder_mode` 说明与推荐组合。
+- 版本升级到 `v0.6.0`。
+
+## [v0.5.0] - feature
+- `decode_bag.py` 新增 bag 级多进程并行参数 `decode.bag_workers`，并在 `main()` 层支持多 bag 并发处理。
+- 新增解码 profiling 汇总：单 bag `elapsed_sec/fps_out`，以及 H.265 packet 的 `packet_total/packet_decode_attempts/packet_decode_success/ffmpeg_calls` 等指标。
+- H.265 packet 路径新增冷却策略 `decode.h265_decode_cooldown_packets`，在连续失败场景下减少高频 ffmpeg 调用与回退开销。
+- README 与 `config.yaml` 明确并发分层（bag 级并行 vs 单 bag 内并发）及推荐参数组合。
+- 车道数标签空间由 `1,2,3,4,5,6+` 收敛为 `1,2,2+`，并同步到标注、数据映射、推理与配置。
+- 版本升级到 `v0.5.0`。
 
 ## [v0.4.1] - bugfix
 - `build_manifest.py` 增加脏值容错（`safe_int`）与字符串归一化（`strip/lower`），避免 CSV 异常值导致生成中断。

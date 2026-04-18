@@ -19,7 +19,7 @@ from torchvision import transforms
 from model import build_model
 
 DIRECTION_NAMES = ["unidirectional", "bidirectional"]
-LANE_NAMES = ["1", "2", "3", "4", "5", "6+"]
+LANE_NAMES = ["1", "2", "2+"]
 
 
 def safe_int(value, default):

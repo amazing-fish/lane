@@ -30,10 +30,13 @@ decode:
     - "/cam_13"
     - "/cam_14"
   h265_context_packets: 24
+  bag_workers: 1           # bag 级并行进程数；单机建议 <= 物理核数/2，默认1保持兼容
   frame_step: 5            # 每 5 个“成功解码帧”保留 1 帧（避免包流步进导致全损坏）
-  write_workers: 4         # CPU 多线程写盘（12核24线程机器建议先试 8）
-  ffmpeg_threads: 0        # ffmpeg 解码线程数，0=ffmpeg 自动选择（12核机器可试 8~12）
-  ffmpeg_hwaccel: "auto"   # H.265 硬件解码: auto/cuda/vaapi/qsv/videotoolbox/none（NVIDIA 可设 cuda）
+  write_workers: 8         # 单 bag 内写盘线程（12C/24T + NVIDIA 推荐 6~10）
+  ffmpeg_threads: 6        # 单 bag 内 ffmpeg 解码线程（多 bag 并行时建议 4~8）
+  ffmpeg_hwaccel: "cuda"   # H.265 硬件解码: auto/cuda/vaapi/qsv/videotoolbox/none
+  h265_decoder_mode: "legacy"  # legacy=每次调用ffmpeg(默认兼容)；persistent=长生命周期ffmpeg进程
+  h265_decode_cooldown_packets: 8  # H.265 连续失败后冷却包数，减少高频 ffmpeg 进程调用
   output_format: "jpg"
   jpeg_quality: 95
   max_frames_per_bag: null  # null = 不限制
@@ -52,7 +55,7 @@ model:
   feature_dim: 768
   mil_hidden_dim: 256
   num_direction_classes: 2   # 双向 / 单向
-  num_lane_classes: 6        # 1,2,3,4,5,6+
+  num_lane_classes: 3        # 1,2,2+
   dropout: 0.3
   image_size: 224
 

@@ -10,9 +10,12 @@ decode_bag.py - 从前视 camera bag 包解码图像帧与时间戳索引
 import argparse
 import csv
 import os
+import select
 import shutil
 import subprocess
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from pathlib import Path
@@ -148,7 +151,14 @@ def extract_packet_payload(msg):
 class H265PacketDecoder:
     """基于 ffmpeg 的 H.265 包解码器（单包 + 上下文拼接回退）."""
 
-    def __init__(self, context_packets=24, ffmpeg_threads=0, ffmpeg_hwaccel="auto"):
+    def __init__(
+        self,
+        context_packets=24,
+        ffmpeg_threads=0,
+        ffmpeg_hwaccel="auto",
+        decode_cooldown_packets=0,
+        decoder_mode="legacy",
+    ):
         self.context_packets = max(1, int(context_packets))
         self.packet_buffer = deque(maxlen=self.context_packets)
         self.ffmpeg_available = shutil.which("ffmpeg") is not None
@@ -156,6 +166,24 @@ class H265PacketDecoder:
         self.ffmpeg_hwaccel = (ffmpeg_hwaccel or "").strip().lower()
         self.hwaccel_enabled = self.ffmpeg_hwaccel not in ("", "none", "off", "cpu")
         self.hwaccel_ready = self.ffmpeg_available and self.hwaccel_enabled
+        self.decode_cooldown_packets = max(0, int(decode_cooldown_packets))
+        self.decoder_mode = (decoder_mode or "legacy").strip().lower()
+        if self.decoder_mode not in ("legacy", "persistent"):
+            self.decoder_mode = "legacy"
+
+        self.proc = None
+        self.stdout_buffer = bytearray()
+        self._cooldown_counter = 0
+        self.stats = {
+            "packet_total": 0,
+            "packet_decode_attempts": 0,
+            "packet_decode_skips": 0,
+            "packet_decode_success": 0,
+            "ffmpeg_calls": 0,
+            "ffmpeg_hw_fallbacks": 0,
+            "ffmpeg_process_restarts": 0,
+            "ffmpeg_process_launches": 0,
+        }
 
     @staticmethod
     def _looks_like_annexb(packet_bytes):
@@ -169,6 +197,10 @@ class H265PacketDecoder:
     def _decode_stream(self, stream_bytes):
         if not self.ffmpeg_available or not stream_bytes:
             return None
+        if self.decoder_mode == "persistent":
+            return self._decode_stream_persistent(stream_bytes)
+
+        self.stats["ffmpeg_calls"] += 1
 
         base_cmd = [
             "ffmpeg",
@@ -208,20 +240,225 @@ class H265PacketDecoder:
         if proc.returncode != 0 or not proc.stdout:
             if self.hwaccel_ready:
                 self.hwaccel_ready = False
+                self.stats["ffmpeg_hw_fallbacks"] += 1
                 return self._decode_stream(stream_bytes)
             return None
         arr = np.frombuffer(proc.stdout, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
+    @staticmethod
+    def _extract_jpeg_from_buffer(buf):
+        """从字节缓存中提取一张完整 JPEG，返回 bytes 或 None。"""
+        soi = buf.find(b"\xff\xd8")
+        if soi < 0:
+            if len(buf) > 1024 * 1024:
+                del buf[:-1024]
+            return None
+        eoi = buf.find(b"\xff\xd9", soi + 2)
+        if eoi < 0:
+            if soi > 0:
+                del buf[:soi]
+            return None
+        jpeg = bytes(buf[soi:eoi + 2])
+        del buf[:eoi + 2]
+        return jpeg
+
+    def _build_persistent_cmd(self):
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        ]
+        if self.ffmpeg_threads > 0:
+            cmd.extend(["-threads", str(self.ffmpeg_threads)])
+        if self.hwaccel_ready:
+            cmd.extend(["-hwaccel", self.ffmpeg_hwaccel])
+        cmd.extend([
+            "-f",
+            "hevc",
+            "-i",
+            "pipe:0",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ])
+        return cmd
+
+    def _ensure_persistent_proc(self):
+        if self.proc is not None and self.proc.poll() is None:
+            return True
+        if not self.ffmpeg_available:
+            return False
+        self._close_persistent_proc()
+        try:
+            self.proc = subprocess.Popen(
+                self._build_persistent_cmd(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+            self.stats["ffmpeg_process_launches"] += 1
+            self.stdout_buffer.clear()
+            return True
+        except Exception:
+            self.proc = None
+            return False
+
+    def _close_persistent_proc(self):
+        if self.proc is None:
+            return
+        try:
+            if self.proc.stdin:
+                self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=0.5)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        self.proc = None
+
+    def _decode_stream_persistent(self, stream_bytes, read_frame=True):
+        if not self._ensure_persistent_proc():
+            return None
+
+        def _drain_stdout_nonblocking(max_bytes=4 * 1024 * 1024):
+            """非阻塞回收 stdout，避免 feed-only 时 pipe 积压导致 ffmpeg 阻塞。"""
+            if self.proc is None or self.proc.stdout is None:
+                return
+            fd = self.proc.stdout.fileno()
+            drained = 0
+            # feed-only 期间不使用历史输出，先清空缓存避免后续读到过期帧
+            self.stdout_buffer.clear()
+            while drained < max_bytes:
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0)
+                except Exception:
+                    return
+                if not ready:
+                    return
+                try:
+                    chunk = os.read(fd, min(64 * 1024, max_bytes - drained))
+                except Exception:
+                    return
+                if not chunk:
+                    return
+                drained += len(chunk)
+                # feed-only 期间直接丢弃输出，避免旧帧污染与缓存增长
+
+        def _attempt_once(payload):
+            try:
+                self.proc.stdin.write(payload)
+                self.proc.stdin.flush()
+            except Exception:
+                return None, "write_failed"
+            if not read_frame:
+                _drain_stdout_nonblocking()
+                return None, "feed_only"
+
+            fd = self.proc.stdout.fileno() if self.proc and self.proc.stdout else None
+            if fd is None:
+                return None, "stdout_unavailable"
+            timeout_sec = 0.25
+            deadline = time.perf_counter() + timeout_sec
+            while time.perf_counter() < deadline:
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0.02)
+                except Exception:
+                    return None, "select_failed"
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 64 * 1024)
+                except Exception:
+                    return None, "read_failed"
+                if not chunk:
+                    return None, "empty_read"
+                self.stdout_buffer.extend(chunk)
+                jpeg = self._extract_jpeg_from_buffer(self.stdout_buffer)
+                if jpeg is None:
+                    continue
+                arr = np.frombuffer(jpeg, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    return img, None
+            return None, "timeout"
+
+        self.stats["ffmpeg_calls"] += 1
+        img, err = _attempt_once(stream_bytes)
+        if err == "feed_only":
+            return None
+        # timeout 是“当前packet尚未形成完整可输出帧”的常见情形，不应重启并丢失解码上下文
+        if err == "timeout":
+            return None
+        if img is not None:
+            return img
+
+        self.stats["ffmpeg_process_restarts"] += 1
+        self._close_persistent_proc()
+
+        # 尝试一次重启（如硬件加速导致异常，则降级到 CPU 再起进程）
+        if self.hwaccel_ready:
+            self.hwaccel_ready = False
+            self.stats["ffmpeg_hw_fallbacks"] += 1
+        if not self._ensure_persistent_proc():
+            return None
+        self.stats["ffmpeg_calls"] += 1
+        img, err = _attempt_once(stream_bytes)
+        if err == "feed_only":
+            return None
+        return img
+
     def decode_packet(self, packet_bytes):
         if not packet_bytes:
             return None
+        self.stats["packet_total"] += 1
         self.packet_buffer.append(packet_bytes)
+        # persistent 模式依赖连续输入，不可在冷却期直接丢包；冷却期只做 feed 不取帧
+        if self.decoder_mode == "persistent":
+            if self._cooldown_counter > 0:
+                self._cooldown_counter -= 1
+                self.stats["packet_decode_skips"] += 1
+                self._decode_stream_persistent(packet_bytes, read_frame=False)
+                return None
+            self.stats["packet_decode_attempts"] += 1
+            img = self._decode_stream_persistent(packet_bytes, read_frame=True)
+            if img is not None:
+                self.stats["packet_decode_success"] += 1
+                return img
+            if self.decode_cooldown_packets > 0:
+                self._cooldown_counter = self.decode_cooldown_packets
+            return None
+
+        if self._cooldown_counter > 0:
+            self._cooldown_counter -= 1
+            self.stats["packet_decode_skips"] += 1
+            return None
+
+        self.stats["packet_decode_attempts"] += 1
         img = self._decode_stream(packet_bytes)
         if img is not None:
+            self.stats["packet_decode_success"] += 1
             return img
         merged = b"".join(self.packet_buffer)
-        return self._decode_stream(merged)
+        img = self._decode_stream(merged)
+        if img is not None:
+            self.stats["packet_decode_success"] += 1
+            return img
+        if self.decode_cooldown_packets > 0:
+            self._cooldown_counter = self.decode_cooldown_packets
+        return None
+
+    def close(self):
+        self._close_persistent_proc()
 
 
 def maybe_decode_packet_message(msg, msg_type, packet_decoder):
@@ -334,6 +571,8 @@ def decode_bag_ros1(
     write_workers=1,
     ffmpeg_threads=0,
     ffmpeg_hwaccel="auto",
+    h265_decode_cooldown_packets=0,
+    h265_decoder_mode="legacy",
 ):
     """从 ROS1 bag 导出图像帧."""
     rosbag = _try_import_rosbag()
@@ -349,6 +588,8 @@ def decode_bag_ros1(
         context_packets=h265_context_packets,
         ffmpeg_threads=ffmpeg_threads,
         ffmpeg_hwaccel=ffmpeg_hwaccel,
+        decode_cooldown_packets=h265_decode_cooldown_packets,
+        decoder_mode=h265_decoder_mode,
     )
     warned_ffmpeg = False
     writer = AsyncFrameWriter(max_workers=write_workers)
@@ -383,12 +624,13 @@ def decode_bag_ros1(
         main_error = e
         raise
     finally:
+        packet_decoder.close()
         close_errors = _safe_close_resources(bag=bag, writer=writer)
         if close_errors and main_error is not None:
             print(f"[WARN] 清理阶段出现异常（已保留主异常）: {'; '.join(close_errors)}")
         elif close_errors:
             raise RuntimeError(f"清理阶段异常: {'; '.join(close_errors)}")
-    return index_rows
+    return index_rows, packet_decoder.stats
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +649,8 @@ def decode_bag_ros2(
     write_workers=1,
     ffmpeg_threads=0,
     ffmpeg_hwaccel="auto",
+    h265_decode_cooldown_packets=0,
+    h265_decoder_mode="legacy",
 ):
     """从 ROS2 bag 导出图像帧."""
     Ros2Reader, deserialize_cdr = _try_import_rosbags()
@@ -420,6 +664,8 @@ def decode_bag_ros2(
         context_packets=h265_context_packets,
         ffmpeg_threads=ffmpeg_threads,
         ffmpeg_hwaccel=ffmpeg_hwaccel,
+        decode_cooldown_packets=h265_decode_cooldown_packets,
+        decoder_mode=h265_decoder_mode,
     )
     warned_ffmpeg = False
     writer = AsyncFrameWriter(max_workers=write_workers)
@@ -460,12 +706,13 @@ def decode_bag_ros2(
         main_error = e
         raise
     finally:
+        packet_decoder.close()
         close_errors = _safe_close_resources(writer=writer)
         if close_errors and main_error is not None:
             print(f"[WARN] 清理阶段出现异常（已保留主异常）: {'; '.join(close_errors)}")
         elif close_errors:
             raise RuntimeError(f"清理阶段异常: {'; '.join(close_errors)}")
-    return index_rows
+    return index_rows, packet_decoder.stats
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +735,7 @@ def detect_bag_type(bag_path):
 
 def decode_single_bag(bag_path, output_dir, cfg):
     """解码单个 bag，自动检测格式，返回帧索引."""
+    t0 = time.perf_counter()
     bag_path = Path(bag_path)
     bag_type = detect_bag_type(bag_path)
     candidate_topics = cfg["decode"]["front_camera_topics"]
@@ -499,6 +747,8 @@ def decode_single_bag(bag_path, output_dir, cfg):
     write_workers = cfg["decode"].get("write_workers", 1)
     ffmpeg_threads = cfg["decode"].get("ffmpeg_threads", 0)
     ffmpeg_hwaccel = cfg["decode"].get("ffmpeg_hwaccel", "auto")
+    h265_decode_cooldown_packets = cfg["decode"].get("h265_decode_cooldown_packets", 0)
+    h265_decoder_mode = cfg["decode"].get("h265_decoder_mode", "legacy")
 
     # 列出 topic 并匹配前视
     if bag_type == "ros1":
@@ -516,12 +766,30 @@ def decode_single_bag(bag_path, output_dir, cfg):
 
     if not topics:
         print(f"[ERROR] 无法读取 {bag_path} 的 topic 列表")
-        return []
+        elapsed_sec = time.perf_counter() - t0
+        return {
+            "bag": bag_path.name,
+            "bag_path": str(bag_path),
+            "frames": 0,
+            "status": "failed",
+            "elapsed_sec": elapsed_sec,
+            "fps_out": 0.0,
+            "packet_stats": {},
+        }
 
     front_topic = find_front_topic(topics, candidate_topics)
     if front_topic is None:
         print(f"[ERROR] 未找到前视 topic, 可用 topics: {topics}")
-        return []
+        elapsed_sec = time.perf_counter() - t0
+        return {
+            "bag": bag_path.name,
+            "bag_path": str(bag_path),
+            "frames": 0,
+            "status": "failed",
+            "elapsed_sec": elapsed_sec,
+            "fps_out": 0.0,
+            "packet_stats": {},
+        }
 
     print(f"  bag类型: {bag_type}, 前视topic: {front_topic}")
 
@@ -541,6 +809,8 @@ def decode_single_bag(bag_path, output_dir, cfg):
             write_workers,
             ffmpeg_threads,
             ffmpeg_hwaccel,
+            h265_decode_cooldown_packets,
+            h265_decoder_mode,
         )
     else:
         rows = decode_bag_ros2(
@@ -555,7 +825,10 @@ def decode_single_bag(bag_path, output_dir, cfg):
             write_workers,
             ffmpeg_threads,
             ffmpeg_hwaccel,
+            h265_decode_cooldown_packets,
+            h265_decoder_mode,
         )
+    rows, packet_stats = rows
 
     # 保存时间戳索引
     if rows:
@@ -566,7 +839,20 @@ def decode_single_bag(bag_path, output_dir, cfg):
             writer.writerows(rows)
         print(f"  导出 {len(rows)} 帧 -> {clip_output_dir}")
 
-    return rows
+    elapsed_sec = time.perf_counter() - t0
+    return {
+        "bag": bag_path.name,
+        "bag_path": str(bag_path),
+        "frames": len(rows),
+        "status": "ok" if rows else "failed",
+        "elapsed_sec": elapsed_sec,
+        "fps_out": (len(rows) / elapsed_sec) if elapsed_sec > 0 else 0.0,
+        "packet_stats": packet_stats,
+    }
+
+
+def _decode_single_bag_worker(bag_path, output_dir, cfg):
+    return decode_single_bag(bag_path, output_dir, cfg)
 
 
 def main():
@@ -599,22 +885,61 @@ def main():
         print(f"[ERROR] 在 {bag_dir} 中未找到 bag 文件")
         sys.exit(1)
 
+    bag_workers = int(cfg["decode"].get("bag_workers", 1))
+    bag_workers = max(1, bag_workers)
     print(f"找到 {len(bag_files)} 个 bag 文件")
+    print(f"bag_workers={bag_workers}（bag 级并行进程数）")
     summary = []
+    if bag_workers == 1 or len(bag_files) == 1:
+        for bag_path in bag_files:
+            print(f"\n处理: {bag_path}")
+            report = decode_single_bag(bag_path, output_dir, cfg)
+            summary.append(report)
+    else:
+        with ProcessPoolExecutor(max_workers=min(bag_workers, len(bag_files))) as ex:
+            fut_to_bag = {
+                ex.submit(_decode_single_bag_worker, str(bag_path), output_dir, cfg): bag_path
+                for bag_path in bag_files
+            }
+            for fut in as_completed(fut_to_bag):
+                bag_path = fut_to_bag[fut]
+                try:
+                    report = fut.result()
+                    summary.append(report)
+                    print(
+                        f"\n完成: {bag_path.name} | frames={report['frames']} | "
+                        f"time={report['elapsed_sec']:.2f}s | fps={report['fps_out']:.2f}"
+                    )
+                except Exception as e:
+                    print(f"\n[ERROR] 处理失败: {bag_path} -> {e}")
+                    summary.append({
+                        "bag": bag_path.name,
+                        "bag_path": str(bag_path),
+                        "frames": 0,
+                        "status": "failed",
+                        "elapsed_sec": 0.0,
+                        "fps_out": 0.0,
+                        "packet_stats": {},
+                    })
 
-    for bag_path in bag_files:
-        print(f"\n处理: {bag_path}")
-        rows = decode_single_bag(bag_path, output_dir, cfg)
-        summary.append({
-            "bag": str(bag_path.name),
-            "frames": len(rows),
-            "status": "ok" if rows else "failed"
-        })
+    summary = sorted(summary, key=lambda x: x["bag"])
 
     # 输出汇总
     print("\n===== 解码汇总 =====")
     for s in summary:
-        print(f"  {s['bag']}: {s['frames']} 帧 [{s['status']}]")
+        print(
+            f"  {s['bag']}: {s['frames']} 帧 [{s['status']}] | "
+            f"time={s['elapsed_sec']:.2f}s | fps={s['fps_out']:.2f}"
+        )
+        p = s.get("packet_stats") or {}
+        if p:
+            print(
+                "    packet_total={packet_total}, packet_decode_attempts={packet_decode_attempts}, "
+                "packet_decode_skips={packet_decode_skips}, packet_decode_success={packet_decode_success}, "
+                "ffmpeg_calls={ffmpeg_calls}, ffmpeg_hw_fallbacks={ffmpeg_hw_fallbacks}, "
+                "ffmpeg_process_launches={ffmpeg_process_launches}, "
+                "ffmpeg_process_restarts={ffmpeg_process_restarts}".format(**p)
+            )
 
     ok_count = sum(1 for s in summary if s["status"] == "ok")
     print(f"\n成功: {ok_count}/{len(summary)}")
