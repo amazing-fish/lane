@@ -330,6 +330,31 @@ class H265PacketDecoder:
         if not self._ensure_persistent_proc():
             return None
 
+        def _drain_stdout_nonblocking(max_bytes=256 * 1024):
+            """非阻塞回收 stdout，避免 feed-only 时 pipe 积压导致 ffmpeg 阻塞。"""
+            if self.proc is None or self.proc.stdout is None:
+                return
+            fd = self.proc.stdout.fileno()
+            drained = 0
+            while drained < max_bytes:
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0)
+                except Exception:
+                    return
+                if not ready:
+                    return
+                try:
+                    chunk = os.read(fd, min(64 * 1024, max_bytes - drained))
+                except Exception:
+                    return
+                if not chunk:
+                    return
+                drained += len(chunk)
+                # 丢弃冷却期产生的帧数据，仅保留少量尾部缓冲避免内存增长
+                self.stdout_buffer.extend(chunk)
+                if len(self.stdout_buffer) > 1024 * 1024:
+                    del self.stdout_buffer[:-1024]
+
         def _attempt_once(payload):
             try:
                 self.proc.stdin.write(payload)
@@ -337,6 +362,7 @@ class H265PacketDecoder:
             except Exception:
                 return None, "write_failed"
             if not read_frame:
+                _drain_stdout_nonblocking()
                 return None, "feed_only"
 
             fd = self.proc.stdout.fileno() if self.proc and self.proc.stdout else None

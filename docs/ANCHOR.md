@@ -334,15 +334,35 @@
 - persistent 模式不再重复写入 merged 数据。
 - 默认配置保持旧行为兼容，显式设置 `persistent` 时启用长生命周期路径。
 
+## 1.17) 技术路径锚点（issue20-review）
+
+### 问题定义
+- issue19 将冷却期改为 feed-only 后，persistent 模式在冷却段不读取 stdout 帧数据。
+- 对高吞吐码流，ffmpeg 仍会持续输出 mjpeg；若长期不消费 stdout，可能触发 pipe 积压并反压到 ffmpeg，造成吞吐下降或阻塞。
+
+### 修复策略（固定路径）
+1. 在 `H265PacketDecoder._decode_stream_persistent` 增加 `_drain_stdout_nonblocking`。
+2. feed-only 路径在写入 packet 后执行非阻塞 drain，定额回收 stdout，避免积压。
+3. 对内部缓冲增加上限裁剪，避免冷却期内存增长。
+
+### 验收标准
+- persistent + 冷却场景下 stdout 可持续被回收，不因长时不读造成明显阻塞。
+- feed-only 语义保持不变：冷却期不返回帧，仅维护码流连续性。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.0 -> v0.6.1`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.1 -> v0.6.2`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.6.2] - bugfix
+- 修复 persistent feed-only 冷却期的 stdout 积压风险：新增非阻塞 drain 机制，避免 ffmpeg 管道反压阻塞。
+- 对冷却期内部缓存增加上限裁剪，避免长期解码内存增长。
+- 版本升级到 `v0.6.2`。
 
 ## [v0.6.1] - bugfix
 - 修复 persistent 模式在冷却期直接丢包的问题：改为 feed-only，保持 ffmpeg 输入连续性。
