@@ -431,15 +431,35 @@
 - `bag_workers>1` 时，控制台可同时显示多行进度条，不再在一行内反复覆盖。
 - 串行模式输出行为保持兼容。
 
+## 1.22) 技术路径锚点（issue25-bugfix）
+
+### 问题定义
+- PR #17 review 指出：按 `idx % worker_count` 分配 `tqdm.position` 仍可能冲突。
+- 在 `ProcessPoolExecutor` 中任务完成顺序不确定，若运行时长不均衡，会出现不同生命周期任务复用同一行位并发显示，进度条再次覆盖。
+
+### 修复策略（固定路径）
+1. 去掉“按提交序号”分配行位的逻辑（`idx % worker_count`）。
+2. 在 worker 进程内部使用 `multiprocessing.current_process()._identity` 计算稳定槽位（`identity-1`）。
+3. 保持串行路径 `position=0` 不变，兼容历史输出。
+
+### 验收标准
+- 同时运行的 worker 进度条行位唯一且稳定，不随任务提交顺序变化。
+- 长短任务混跑时不再出现两条 live 进度条争用同一行位。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **refactor**：`v0.6.9 -> v0.6.10`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.10 -> v0.6.11`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.6.11] - bugfix
+- 根据 PR #17 review 修复并行进度条行位分配缺陷：不再使用 `idx % worker_count`。
+- 改为 worker 进程内按 `multiprocessing.current_process()._identity` 分配稳定 `tqdm.position`，避免长短任务混跑时行位冲突。
+- 版本升级到 `v0.6.11`。
 
 ## [v0.6.10] - refactor
 - 按版本段压缩历史日志：将 `v0.1.x ~ v0.5.x` 改为分段摘要，降低文档冗余并保留演进脉络。

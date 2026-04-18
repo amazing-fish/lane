@@ -9,6 +9,7 @@ decode_bag.py - 从前视 camera bag 包解码图像帧与时间戳索引
 
 import argparse
 import csv
+import multiprocessing
 import os
 import select
 import shutil
@@ -1107,7 +1108,10 @@ def decode_single_bag(bag_path, output_dir, cfg, progress_position=0):
     }
 
 
-def _decode_single_bag_worker(bag_path, output_dir, cfg, progress_position):
+def _decode_single_bag_worker(bag_path, output_dir, cfg):
+    """进程池 worker：按“进程槽位”而非提交顺序分配 tqdm 行位。"""
+    proc_identity = multiprocessing.current_process()._identity  # 形如 (1,), (2,), ...
+    progress_position = (proc_identity[0] - 1) if proc_identity else 0
     return decode_single_bag(bag_path, output_dir, cfg, progress_position=progress_position)
 
 
@@ -1160,9 +1164,8 @@ def main():
                     str(bag_path),
                     output_dir,
                     cfg,
-                    idx % worker_count,
                 ): bag_path
-                for idx, bag_path in enumerate(bag_files)
+                for bag_path in bag_files
             }
             for fut in as_completed(fut_to_bag):
                 bag_path = fut_to_bag[fut]
