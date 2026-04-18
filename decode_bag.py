@@ -158,6 +158,9 @@ class H265PacketDecoder:
         ffmpeg_hwaccel="auto",
         decode_cooldown_packets=0,
         decoder_mode="legacy",
+        legacy_timeout_sec=15.0,
+        persistent_write_timeout_sec=1.0,
+        persistent_read_timeout_sec=1.0,
     ):
         self.context_packets = max(1, int(context_packets))
         self.packet_buffer = deque(maxlen=self.context_packets)
@@ -170,6 +173,9 @@ class H265PacketDecoder:
         self.decoder_mode = (decoder_mode or "legacy").strip().lower()
         if self.decoder_mode not in ("legacy", "persistent"):
             self.decoder_mode = "legacy"
+        self.legacy_timeout_sec = max(0.1, float(legacy_timeout_sec))
+        self.persistent_write_timeout_sec = max(0.05, float(persistent_write_timeout_sec))
+        self.persistent_read_timeout_sec = max(0.05, float(persistent_read_timeout_sec))
 
         self.proc = None
         self.stdout_buffer = bytearray()
@@ -183,6 +189,8 @@ class H265PacketDecoder:
             "ffmpeg_hw_fallbacks": 0,
             "ffmpeg_process_restarts": 0,
             "ffmpeg_process_launches": 0,
+            "ffmpeg_write_timeouts": 0,
+            "ffmpeg_read_timeouts": 0,
         }
 
     @staticmethod
@@ -234,6 +242,7 @@ class H265PacketDecoder:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
+                timeout=self.legacy_timeout_sec,
             )
         except Exception:
             return None
@@ -355,9 +364,26 @@ class H265PacketDecoder:
                 # feed-only 期间直接丢弃输出，避免旧帧污染与缓存增长
 
         def _attempt_once(payload):
+            if self.proc is None or self.proc.stdin is None:
+                return None, "stdin_unavailable"
+            stdin_fd = self.proc.stdin.fileno()
+            total = len(payload)
+            sent = 0
+            write_deadline = time.perf_counter() + self.persistent_write_timeout_sec
             try:
-                self.proc.stdin.write(payload)
-                self.proc.stdin.flush()
+                while sent < total:
+                    remain = write_deadline - time.perf_counter()
+                    if remain <= 0:
+                        self.stats["ffmpeg_write_timeouts"] += 1
+                        return None, "write_timeout"
+                    ready, _, _ = select.select([], [stdin_fd], [], min(0.05, remain))
+                    if not ready:
+                        continue
+                    chunk_end = min(sent + 64 * 1024, total)
+                    n = os.write(stdin_fd, payload[sent:chunk_end])
+                    if n <= 0:
+                        return None, "write_failed"
+                    sent += n
             except Exception:
                 return None, "write_failed"
             if not read_frame:
@@ -367,7 +393,7 @@ class H265PacketDecoder:
             fd = self.proc.stdout.fileno() if self.proc and self.proc.stdout else None
             if fd is None:
                 return None, "stdout_unavailable"
-            timeout_sec = 0.25
+            timeout_sec = self.persistent_read_timeout_sec
             deadline = time.perf_counter() + timeout_sec
             while time.perf_counter() < deadline:
                 try:
@@ -390,6 +416,7 @@ class H265PacketDecoder:
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                 if img is not None:
                     return img, None
+            self.stats["ffmpeg_read_timeouts"] += 1
             return None, "timeout"
 
         self.stats["ffmpeg_calls"] += 1
@@ -573,6 +600,9 @@ def decode_bag_ros1(
     ffmpeg_hwaccel="auto",
     h265_decode_cooldown_packets=0,
     h265_decoder_mode="legacy",
+    h265_legacy_timeout_sec=15.0,
+    h265_persistent_write_timeout_sec=1.0,
+    h265_persistent_read_timeout_sec=1.0,
 ):
     """从 ROS1 bag 导出图像帧."""
     rosbag = _try_import_rosbag()
@@ -590,6 +620,9 @@ def decode_bag_ros1(
         ffmpeg_hwaccel=ffmpeg_hwaccel,
         decode_cooldown_packets=h265_decode_cooldown_packets,
         decoder_mode=h265_decoder_mode,
+        legacy_timeout_sec=h265_legacy_timeout_sec,
+        persistent_write_timeout_sec=h265_persistent_write_timeout_sec,
+        persistent_read_timeout_sec=h265_persistent_read_timeout_sec,
     )
     warned_ffmpeg = False
     writer = AsyncFrameWriter(max_workers=write_workers)
@@ -651,6 +684,9 @@ def decode_bag_ros2(
     ffmpeg_hwaccel="auto",
     h265_decode_cooldown_packets=0,
     h265_decoder_mode="legacy",
+    h265_legacy_timeout_sec=15.0,
+    h265_persistent_write_timeout_sec=1.0,
+    h265_persistent_read_timeout_sec=1.0,
 ):
     """从 ROS2 bag 导出图像帧."""
     Ros2Reader, deserialize_cdr = _try_import_rosbags()
@@ -666,6 +702,9 @@ def decode_bag_ros2(
         ffmpeg_hwaccel=ffmpeg_hwaccel,
         decode_cooldown_packets=h265_decode_cooldown_packets,
         decoder_mode=h265_decoder_mode,
+        legacy_timeout_sec=h265_legacy_timeout_sec,
+        persistent_write_timeout_sec=h265_persistent_write_timeout_sec,
+        persistent_read_timeout_sec=h265_persistent_read_timeout_sec,
     )
     warned_ffmpeg = False
     writer = AsyncFrameWriter(max_workers=write_workers)
@@ -749,6 +788,9 @@ def decode_single_bag(bag_path, output_dir, cfg):
     ffmpeg_hwaccel = cfg["decode"].get("ffmpeg_hwaccel", "auto")
     h265_decode_cooldown_packets = cfg["decode"].get("h265_decode_cooldown_packets", 0)
     h265_decoder_mode = cfg["decode"].get("h265_decoder_mode", "legacy")
+    h265_legacy_timeout_sec = cfg["decode"].get("h265_legacy_timeout_sec", 15.0)
+    h265_persistent_write_timeout_sec = cfg["decode"].get("h265_persistent_write_timeout_sec", 1.0)
+    h265_persistent_read_timeout_sec = cfg["decode"].get("h265_persistent_read_timeout_sec", 1.0)
 
     # 列出 topic 并匹配前视
     if bag_type == "ros1":
@@ -811,6 +853,9 @@ def decode_single_bag(bag_path, output_dir, cfg):
             ffmpeg_hwaccel,
             h265_decode_cooldown_packets,
             h265_decoder_mode,
+            h265_legacy_timeout_sec,
+            h265_persistent_write_timeout_sec,
+            h265_persistent_read_timeout_sec,
         )
     else:
         rows = decode_bag_ros2(
@@ -827,6 +872,9 @@ def decode_single_bag(bag_path, output_dir, cfg):
             ffmpeg_hwaccel,
             h265_decode_cooldown_packets,
             h265_decoder_mode,
+            h265_legacy_timeout_sec,
+            h265_persistent_write_timeout_sec,
+            h265_persistent_read_timeout_sec,
         )
     rows, packet_stats = rows
 

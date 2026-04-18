@@ -365,15 +365,42 @@
 - persistent 模式在 timeout miss 后可继续积累 packet 上下文，不出现频繁重启导致的近零出帧。
 - 历史 lane 标签（3/4/5/6+）在新标签体系下自动映射为 `2+`，不再静默丢失监督。
 
+## 1.19) 技术路径锚点（issue22-bugfix）
+
+### 问题定义
+- 线上反馈在 `h265_decoder_mode=persistent` 下出现“进度条停住、python/ffmpeg 进程常驻、CPU/IO 低占用”的卡住现象。
+- 根因定位在 pipe 交互模型：`stdin.write` 阻塞无超时保护，stdout 等待窗口偏短；同时 legacy 模式缺少子进程级 timeout，异常流可能拖住单次调用。
+
+### 修复策略（固定路径）
+1. 给 legacy 模式 `subprocess.run` 增加超时保护（`decode.h265_legacy_timeout_sec`，默认 15s）。
+2. persistent 模式引入写入侧超时：
+   - 改为基于 `select + os.write` 的分块写入；
+   - 超时返回 `write_timeout`，避免在 `stdin.write/flush` 处无限阻塞。
+3. persistent 模式将 stdout 读取窗口改为可配置（`decode.h265_persistent_read_timeout_sec`，默认 1.0s），降低短窗口误判。
+4. 新增 timeout 统计项（`ffmpeg_write_timeouts`、`ffmpeg_read_timeouts`），便于后续观测与排障。
+5. 文档与配置收敛到“默认推荐 legacy、persistent 需稳定性验证后启用”。
+
+### 验收标准
+- legacy 模式在坏流/异常流上不会无限等待 ffmpeg 子进程。
+- persistent 模式在 pipe 反压时可超时返回，不再长时间卡在写入调用。
+- 配置、README、版本号与锚点日志同步，避免技术路径漂移。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.3 -> v0.6.4`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.4 -> v0.6.5`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.6.5] - bugfix
+- 修复 legacy 模式缺少超时保护的问题：为单次 ffmpeg 调用增加 `timeout`（默认 15s）。
+- 修复 persistent 模式可能在 `stdin.write` 阻塞导致卡住的问题：改为 `select + os.write` 分块写入并增加写超时保护。
+- 放宽并参数化 persistent 读窗口（默认 1.0s），降低短轮询导致的误判；新增写/读超时统计指标便于排障。
+- README 与 `config.yaml` 同步新增超时参数，并将推荐模式收敛为 `legacy`。
+- 版本升级到 `v0.6.5`。
 
 ## [v0.6.4] - bugfix
 - 修复 persistent 解码将 `timeout` 误判为致命失败的问题：timeout miss 不再重启 ffmpeg，保留跨包上下文。
