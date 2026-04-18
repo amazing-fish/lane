@@ -385,15 +385,65 @@
 - persistent 模式在 pipe 反压时可超时返回，不再长时间卡在写入调用。
 - 配置、README、版本号与锚点日志同步，避免技术路径漂移。
 
+## 1.20) 技术路径锚点（issue23-bugfix）
+
+### 问题定义
+- **issue23**：部分 bag 存在“周期性灰屏/大面积灰色异常帧”，仅靠 `frame_step` 抽样无法稳定筛出可用帧。
+- 业务反馈存在“前几帧异常、之后按固定节奏才出现正常帧”的情况，需要自动判别并过滤异常帧。
+
+### 修复策略（固定路径）
+1. 在 `decode_bag.py` 新增帧质量判别函数 `is_valid_frame`，基于 HSV/亮度统计做轻量过滤：
+   - 低饱和像素占比（`gray_ratio`）
+   - 平均饱和度（`sat_mean`）
+   - 明度标准差（`luma_std`）
+2. 在 ROS1/ROS2 两条解码链路中统一接入过滤逻辑，异常帧直接跳过，不参与落盘。
+3. 新增配置项并在 `config.yaml` 固化默认值：
+   - `decode.frame_quality_filter_enabled`
+   - `decode.gray_ratio_max`
+   - `decode.saturation_mean_min`
+   - `decode.luma_std_min`
+4. 在 README 增加“异常帧过滤”与调参建议，保证实现与文档同步。
+5. 解码汇总增加 `skipped_bad_frames` 指标，便于观察过滤命中率。
+6. 新增“启动相位探测”策略：
+   - `decode.frame_phase_probe_enabled`
+   - `decode.frame_phase_probe_frames`
+   仅用前若干帧判断“从哪一帧开始正常”，锁定 `sample_phase` 后按 `frame_step` 抽样。
+7. 保留 `decode.frame_quality_check_interval` 作为探测关闭时的兼容路径。
+
+### 验收标准
+- 灰屏/低纹理异常帧可在解码阶段被过滤，不落盘。
+- `frame_step` 语义保持不变（仍按“成功解码且通过质量过滤”的帧计数抽样）。
+- ROS1/ROS2 行为一致，索引结构不变，仅输出帧质量提升。
+- 启用探测时，解码汇总可见 `phase_probe_frames/phase_probe_hits/sample_phase`，用于校验起始相位判断结果。
+
 ## 2) 版本策略（v主.次.修）
 
-- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.4 -> v0.6.5`。
+- 使用 `v主.次.修`，本次为 **bugfix**：`v0.6.7 -> v0.6.8`。
 - 语义约定：
   - `feature`：新增能力，升次版本。
   - `bugfix`：修复问题，升修订版本。
   - `refactor`：重构不改行为，通常升修订版本（如影响较大可升次版本）。
 
 ## 3) 修改日志（防漂移）
+
+## [v0.6.8] - bugfix
+- 调整异常帧方案为“前几帧探测相位 + 固定相位抽样”：通过 `frame_phase_probe_enabled/frame_phase_probe_frames` 判断从哪一帧开始正常。
+- ROS1/ROS2 新增 `phase_probe_frames/phase_probe_hits/sample_phase` 统计，便于验证探测效果。
+- `frame_quality_check_interval` 保留为探测关闭时的兼容模式，README/config/ANCHOR 同步更新。
+- 版本升级到 `v0.6.8`。
+
+## [v0.6.7] - bugfix
+- 新增 `decode.frame_quality_check_interval`，支持帧质量“每帧判别/按周期判别”。
+- ROS1/ROS2 解码链路统一接入周期判别逻辑，新增 `skipped_quality_checks` 统计字段。
+- README 与 config 同步补充“每帧还是按周期”的行为说明和调参建议。
+- 版本升级到 `v0.6.7`。
+
+## [v0.6.6] - bugfix
+- 新增解码阶段异常帧过滤：基于 `gray_ratio/sat_mean/luma_std` 判别并跳过大面积灰色、低纹理帧。
+- ROS1/ROS2 解码链路统一接入质量过滤逻辑，并新增 `skipped_bad_frames` 统计指标。
+- `config.yaml` 新增帧质量过滤参数（`frame_quality_filter_enabled`、`gray_ratio_max`、`saturation_mean_min`、`luma_std_min`）。
+- README 补充“异常帧过滤”机制与“每 5 帧正常 1 帧”场景调参建议。
+- 版本升级到 `v0.6.6`。
 
 ## [v0.6.5] - bugfix
 - 修复 legacy 模式缺少超时保护的问题：为单次 ffmpeg 调用增加 `timeout`（默认 15s）。
