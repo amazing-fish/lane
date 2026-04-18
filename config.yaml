@@ -35,7 +35,10 @@ decode:
   write_workers: 8         # 单 bag 内写盘线程（12C/24T + NVIDIA 推荐 6~10）
   ffmpeg_threads: 6        # 单 bag 内 ffmpeg 解码线程（多 bag 并行时建议 4~8）
   ffmpeg_hwaccel: "cuda"   # H.265 硬件解码: auto/cuda/vaapi/qsv/videotoolbox/none
-  h265_decoder_mode: "legacy"  # legacy=每次调用ffmpeg(默认兼容)；persistent=长生命周期ffmpeg进程
+  h265_decoder_mode: "legacy"  # 默认 legacy（更稳）；persistent 仍可选但建议仅在稳定性验证后启用
+  h265_legacy_timeout_sec: 15.0  # legacy 模式单次 ffmpeg 超时，避免坏流导致子进程长时间阻塞
+  h265_persistent_write_timeout_sec: 1.0  # persistent 写 stdin 超时（秒），避免管道反压卡住
+  h265_persistent_read_timeout_sec: 1.0   # persistent 读 stdout 等待窗口（秒），默认较旧实现更宽松
   h265_decode_cooldown_packets: 8  # H.265 连续失败后冷却包数，减少高频 ffmpeg 进程调用
   output_format: "jpg"
   jpeg_quality: 95

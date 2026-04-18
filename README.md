@@ -1,6 +1,6 @@
 # lane
 
-- 当前版本：`v0.6.4`（见 `VERSION`）。
+- 当前版本：`v0.6.5`（见 `VERSION`）。
 - 技术路径与修改日志锚点：`docs/ANCHOR.md`。
 - 当前主任务：**segment（坡道区间）级属性识别**（不再以整 clip 作为训练样本单位）。
 
@@ -48,8 +48,12 @@ python decode_bag.py --config config.yaml --bag_dir ./data/bags --output_dir ./d
 - **单 bag 内 ffmpeg 解码并发**：`decode.ffmpeg_threads`
   - 作用于 H.265 packet 的 ffmpeg 调用线程数。
 - **H.265 解码进程模式**：`decode.h265_decoder_mode`
-  - `legacy`：每次尝试解码都启动一次 ffmpeg（默认，兼容旧行为）。
-  - `persistent`：长生命周期 ffmpeg 进程，持续喂入 packet，减少进程启动开销（推荐）。
+  - `legacy`：每次尝试解码都启动一次 ffmpeg（默认，当前推荐，稳定性更好）。
+  - `persistent`：长生命周期 ffmpeg 进程，持续喂入 packet，减少进程启动开销（建议完成稳定性验证后再启用）。
+- **H.265 超时保护参数**：
+  - `decode.h265_legacy_timeout_sec`：legacy 单次 ffmpeg 调用超时（默认 15s）。
+  - `decode.h265_persistent_write_timeout_sec`：persistent 向 stdin 写入超时（默认 1.0s）。
+  - `decode.h265_persistent_read_timeout_sec`：persistent 读取 stdout 等待窗口（默认 1.0s）。
 - **H.265 解码降开销策略**：`decode.h265_decode_cooldown_packets`
   - 连续失败后进入冷却，跳过若干 packet 的解码尝试，降低高频 ffmpeg 进程启动/回退开销。
 
@@ -73,7 +77,7 @@ python decode_bag.py --config config.yaml --bag_dir ./data/bags --output_dir ./d
   - `write_workers: 8`
   - `ffmpeg_threads: 6`
   - `ffmpeg_hwaccel: "cuda"`
-  - `h265_decoder_mode: "persistent"`
+  - `h265_decoder_mode: "legacy"`
 - IO 紧张时：
   - 先降 `bag_workers`（如 `2 -> 1`），再降 `write_workers`。
 - GPU 忙/不稳定时：
