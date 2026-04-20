@@ -6,14 +6,14 @@
   <title>Lane MVP - Web关键帧标注</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #111; color: #eee; }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 16px; }
     .card { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     button { background: #2b2b2b; color: #eee; border: 1px solid #555; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
     button:hover { background: #3a3a3a; }
     .imgbox { min-height: 560px; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 10px; }
     img { max-width: 100%; max-height: 560px; object-fit: contain; }
-    fieldset { border: 1px solid #444; border-radius: 8px; }
+    fieldset { border: 1px solid #444; border-radius: 8px; margin-bottom: 10px; }
     .status { color: #9fd6ff; }
     .hint { color: #9a9a9a; font-size: 12px; }
     .pill { padding: 2px 8px; border-radius: 999px; background: #2a2a2a; border: 1px solid #444; }
@@ -37,38 +37,46 @@
 
     <div class="card">
       <fieldset>
-        <legend>帧范围 frame_scope</legend>
+        <legend>关键帧：frame_scope</legend>
         <label><input type="radio" name="scope" value="slope"> slope</label>
         <label><input type="radio" name="scope" value="transition"> transition</label>
         <label><input type="radio" name="scope" value="non_slope"> non_slope</label>
         <label><input type="radio" name="scope" value="unknown"> unknown</label>
       </fieldset>
-    </div>
 
-    <div class="card">
       <fieldset>
-        <legend>是否双向</legend>
-        <label><input type="radio" name="dir" value="yes"> yes (B)</label>
-        <label><input type="radio" name="dir" value="no"> no (N)</label>
-        <label><input type="radio" name="dir" value="unknown"> unknown (U)</label>
+        <legend>当前 clip：is_bidirectional</legend>
+        <label><input type="radio" name="dir" value="yes"> yes(B)</label>
+        <label><input type="radio" name="dir" value="no"> no(N)</label>
+        <label><input type="radio" name="dir" value="unknown"> unknown(U)</label>
       </fieldset>
-    </div>
 
-    <div class="card">
       <fieldset>
-        <legend>总车道数</legend>
+        <legend>当前 clip：lane_count</legend>
         <label><input type="radio" name="lane" value="1">1</label>
         <label><input type="radio" name="lane" value="2">2</label>
         <label><input type="radio" name="lane" value="2+">2+</label>
-        <label><input type="radio" name="lane" value="unknown">unknown (0)</label>
+        <label><input type="radio" name="lane" value="unknown">unknown</label>
       </fieldset>
-      <p class="hint">规则：当 frame_scope != slope 时，is_bidirectional 与 lane_count 自动归一化为 unknown。</p>
-      <p class="hint">快捷键：←/A 上一张，→/D 下一张，B/N/U 设置双向，1=1车道，2=2车道，3=2+车道，0=unknown，Ctrl/Cmd+S 保存。</p>
+
+      <fieldset>
+        <legend>当前 clip：quality</legend>
+        <label><input type="radio" name="quality" value="ok">ok</label>
+        <label><input type="radio" name="quality" value="review">review</label>
+        <label><input type="radio" name="quality" value="bad">bad</label>
+        <label><input type="radio" name="quality" value="unknown">unknown</label>
+      </fieldset>
+
+      <div>
+        <label>当前 clip：notes <input id="notes" type="text" style="width: 70%;" /></label>
+      </div>
+      <p class="hint">当前模式：frame_scope 按关键帧标；属性按 clip 只标一次并自动复用。</p>
+      <p class="hint">快捷键：←/A 上一张，→/D 下一张，B/N/U 设置双向，1/2/3 设置车道，Ctrl/Cmd+S 保存。</p>
     </div>
   </div>
 
 <script>
-let state = { images: [], labels: {}, idx: 0, total: 0, labeled: 0 };
+let state = { images: [], keyframe_labels: {}, clip_labels: {}, idx: 0, total: 0 };
 
 function byName(name, value) {
   const el = document.querySelector(`input[name="${name}"][value="${value}"]`);
@@ -80,99 +88,97 @@ function getChecked(name) {
   return el ? el.value : 'unknown';
 }
 
-function currentRel() {
-  return state.images[state.idx] || '';
-}
+function currentRel() { return state.images[state.idx] || ''; }
 
-function getMeta(rel) {
+function meta(rel) {
   const norm = rel.replaceAll('\\\\', '/');
   const parts = norm.split('/');
-  const clipId = parts.length ? parts[0] : 'unknown';
+  const clip = parts.length ? parts[0] : 'unknown';
   const base = parts[parts.length - 1] || '';
   const stem = base.replace(/\.[^.]+$/, '');
   const nums = stem.match(/\d+/g);
   const frameIdx = nums && nums.length ? parseInt(nums[nums.length - 1], 10) : -1;
-  return { clipId, frameIdx };
+  return { clip, frameIdx };
 }
 
-function normalizeLabel(v) {
-  const scope = ['slope', 'transition', 'non_slope', 'unknown'].includes(v.frame_scope) ? v.frame_scope : 'unknown';
-  let dir = ['yes', 'no', 'unknown'].includes(v.is_bidirectional) ? v.is_bidirectional : 'unknown';
-  const laneRaw = String(v.lane_count || 'unknown').trim().toLowerCase();
-  const legacyLaneMap = { '3': '2+', '4': '2+', '5': '2+', '6+': '2+' };
-  const laneNorm = legacyLaneMap[laneRaw] || laneRaw;
-  let lane = ['1', '2', '2+', 'unknown'].includes(laneNorm) ? laneNorm : 'unknown';
-  if (scope !== 'slope') {
-    dir = 'unknown';
-    lane = 'unknown';
+function normalizeScope(v) {
+  return ['slope', 'transition', 'non_slope', 'unknown'].includes(v) ? v : 'unknown';
+}
+
+function normalizeClip(v) {
+  const nv = v || {};
+  const laneRaw = String(nv.lane_count || 'unknown').trim().toLowerCase();
+  const legacy = {'3': '2+', '4': '2+', '5': '2+', '6+': '2+'};
+  const lane = legacy[laneRaw] || laneRaw;
+  return {
+    is_bidirectional: ['yes', 'no', 'unknown'].includes(nv.is_bidirectional) ? nv.is_bidirectional : 'unknown',
+    lane_count: ['1', '2', '2+', 'unknown'].includes(lane) ? lane : 'unknown',
+    quality: ['ok', 'review', 'bad', 'unknown'].includes(nv.quality) ? nv.quality : 'unknown',
+    notes: String(nv.notes || '').trim()
+  };
+}
+
+function labeledCount() {
+  return Object.values(state.keyframe_labels).filter(v => normalizeScope(v) !== 'unknown').length;
+}
+
+function currentClip() {
+  return meta(currentRel()).clip;
+}
+
+function ensureClipLabel(clip) {
+  if (!state.clip_labels[clip]) {
+    state.clip_labels[clip] = normalizeClip({});
   }
-  return { frame_scope: scope, is_bidirectional: dir, lane_count: lane };
 }
 
-function setStatus(msg) {
-  document.getElementById('status').textContent = msg;
-}
+function updateCurrent() {
+  const rel = currentRel();
+  if (!rel) return;
+  const clip = currentClip();
+  ensureClipLabel(clip);
 
-function calcLabeled() {
-  let count = 0;
-  for (const key of Object.keys(state.labels)) {
-    const v = state.labels[key] || {};
-    if ((v.frame_scope || 'unknown') !== 'unknown') {
-      count += 1;
-    }
-  }
-  return count;
+  state.keyframe_labels[rel] = normalizeScope(getChecked('scope'));
+  state.clip_labels[clip] = normalizeClip({
+    is_bidirectional: getChecked('dir'),
+    lane_count: getChecked('lane'),
+    quality: getChecked('quality'),
+    notes: document.getElementById('notes').value,
+  });
 }
 
 function render() {
   const rel = currentRel();
   if (!rel) return;
-  const meta = getMeta(rel);
+  const m = meta(rel);
+  ensureClipLabel(m.clip);
+
   document.getElementById('kfImg').src = `/image/${encodeURIComponent(rel)}`;
   document.getElementById('progress').textContent = `[${state.idx + 1}/${state.total}] ${rel}`;
-  document.getElementById('meta').textContent = `clip=${meta.clipId}, frame=${meta.frameIdx}`;
-  document.getElementById('labeled').textContent = `已标注: ${calcLabeled()}/${state.total}`;
+  document.getElementById('meta').textContent = `clip=${m.clip}, frame=${m.frameIdx}`;
+  document.getElementById('labeled').textContent = `已标frame_scope: ${labeledCount()}/${state.total}`;
 
-  const lbl = normalizeLabel(state.labels[rel] || { frame_scope: 'unknown', is_bidirectional: 'unknown', lane_count: 'unknown' });
-  byName('scope', lbl.frame_scope);
-  byName('dir', lbl.is_bidirectional);
-  byName('lane', lbl.lane_count);
+  byName('scope', normalizeScope(state.keyframe_labels[rel] || 'unknown'));
+  const clipLbl = normalizeClip(state.clip_labels[m.clip]);
+  byName('dir', clipLbl.is_bidirectional);
+  byName('lane', clipLbl.lane_count);
+  byName('quality', clipLbl.quality);
+  document.getElementById('notes').value = clipLbl.notes;
 }
 
-function updateLabel() {
-  const rel = currentRel();
-  if (!rel) return;
-  const next = normalizeLabel({
-    frame_scope: getChecked('scope'),
-    is_bidirectional: getChecked('dir'),
-    lane_count: getChecked('lane')
-  });
-  state.labels[rel] = next;
-}
-
-async function saveLabels() {
-  updateLabel();
+async function saveAll() {
+  updateCurrent();
   const res = await fetch('/api/save', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ labels: state.labels })
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ keyframe_labels: state.keyframe_labels, clip_labels: state.clip_labels })
   });
   const data = await res.json();
-  setStatus(data.message || '已保存');
+  document.getElementById('status').textContent = data.message || '已保存';
   render();
 }
 
-function prev() {
-  updateLabel();
-  if (state.idx > 0) state.idx -= 1;
-  render();
-}
-
-function next() {
-  updateLabel();
-  if (state.idx < state.total - 1) state.idx += 1;
-  render();
-}
+function prev() { updateCurrent(); if (state.idx > 0) state.idx -= 1; render(); }
+function next() { updateCurrent(); if (state.idx < state.total - 1) state.idx += 1; render(); }
 
 async function init() {
   const res = await fetch('/api/state');
@@ -182,30 +188,22 @@ async function init() {
 
 document.getElementById('prevBtn').addEventListener('click', prev);
 document.getElementById('nextBtn').addEventListener('click', next);
-document.getElementById('saveBtn').addEventListener('click', saveLabels);
-
-document.querySelectorAll('input[name="scope"],input[name="dir"],input[name="lane"]').forEach(el => {
-  el.addEventListener('change', () => {
-    updateLabel();
-    render();
-  });
+document.getElementById('saveBtn').addEventListener('click', saveAll);
+document.getElementById('notes').addEventListener('input', updateCurrent);
+document.querySelectorAll('input[name="scope"],input[name="dir"],input[name="lane"],input[name="quality"]').forEach(el => {
+  el.addEventListener('change', () => { updateCurrent(); render(); });
 });
 
 window.addEventListener('keydown', async (e) => {
   const key = e.key.toLowerCase();
-  if ((e.ctrlKey || e.metaKey) && key === 's') {
-    e.preventDefault();
-    await saveLabels();
-    return;
-  }
+  if ((e.ctrlKey || e.metaKey) && key === 's') { e.preventDefault(); await saveAll(); return; }
   if (key === 'arrowleft' || key === 'a') { prev(); return; }
   if (key === 'arrowright' || key === 'd') { next(); return; }
-  if (key === 'b') { byName('dir', 'yes'); updateLabel(); render(); return; }
-  if (key === 'n') { byName('dir', 'no'); updateLabel(); render(); return; }
-  if (key === 'u') { byName('dir', 'unknown'); updateLabel(); render(); return; }
-  if (key === '1' || key === '2') { byName('lane', key); updateLabel(); render(); return; }
-  if (key === '3') { byName('lane', '2+'); updateLabel(); render(); return; }
-  if (key === '0') { byName('lane', 'unknown'); updateLabel(); render(); return; }
+  if (key === 'b') { byName('dir', 'yes'); updateCurrent(); render(); return; }
+  if (key === 'n') { byName('dir', 'no'); updateCurrent(); render(); return; }
+  if (key === 'u') { byName('dir', 'unknown'); updateCurrent(); render(); return; }
+  if (key === '1' || key === '2') { byName('lane', key); updateCurrent(); render(); return; }
+  if (key === '3') { byName('lane', '2+'); updateCurrent(); render(); return; }
 });
 
 init();

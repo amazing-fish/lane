@@ -550,3 +550,32 @@
 - 修复 Attention MIL 对 padding 未屏蔽的问题，训练/验证/推理统一 `masks` 语义。
 - 增强 mask 鲁棒性（形状校验、全无效防 NaN）并保持向后兼容。
 - 移除高风险左右翻转增强，固定低风险 baseline 增强策略。
+
+## 1.22) 技术路径锚点（issue25-feature）
+
+### 问题定义
+- 现有主链路虽已是 segment 级训练，但真实标注仍依赖“关键帧标注后再手工维护 `segment_labels.csv`”。
+- 该流程导致重复劳动、边界与证据不一致、数据规模扩大后维护成本快速上升。
+
+### 修复策略（固定路径）
+1. 标注真值拆分为两层：
+   - `clip_labels.csv`：clip 级常量属性（`is_bidirectional/lane_count/quality/notes`）；
+   - `keyframe_labels.csv`：关键帧定位标签（`frame_scope`）。
+2. 重构标注工具（Tk/Web）：
+   - 进入 clip 时仅维护一次 clip 属性；
+   - 浏览关键帧时仅维护 `frame_scope`；
+   - 保存时同时输出两份 CSV。
+3. 新增 `build_training_labels_from_keyframes.py`：
+   - 输入 `clip_labels.csv + keyframe_labels.csv + timestamp_index.csv`；
+   - 输出 `auto_segments.csv + train_manifest.csv + val_manifest.csv`。
+4. 第一版区间推断采用“锚点中点切分 + review 降级”：
+   - `slope/non_slope` 作为强锚点；
+   - `unknown/transition` 不直接定边界，但触发 `quality=review`；
+   - 边界证据不足（例如触边）同样降级 `review`。
+5. 保持训练 manifest 契约不变（`sample_id/clip/clip_dir/start_frame/end_frame/frame_count/is_bidirectional/lane_count`），降低训练链路改动面。
+
+### 验收标准
+- 无需人工维护 `segment_labels.csv`，即可由关键帧标注直接生成可训练 manifest。
+- `auto_segments.csv` 可用于审计与复核，`review` 样本默认不进入训练（可配置放行）。
+- 推理仍保持“给定 segment 做属性预测”的能力边界，不虚构 full-clip 端到端能力。
+- `README/config/VERSION/ANCHOR` 同步更新，版本升级为 `v0.7.0`。
