@@ -144,9 +144,11 @@ def manifest_row_to_segment(row):
         frame_count = safe_int(row.get("frame_count"), 0)
         end_frame = start_frame + max(0, frame_count - 1)
 
+    clip_name = row.get("clip", row.get("clip_id", "unknown"))
+    sample_id = row.get("sample_id", row.get("segment_id", clip_name))
     return {
-        "sample_id": row.get("sample_id", row.get("clip", "unknown")),
-        "clip": row.get("clip", "unknown"),
+        "sample_id": sample_id,
+        "clip": clip_name,
         "clip_dir": row.get("clip_dir", ""),
         "start_frame": start_frame,
         "end_frame": end_frame,

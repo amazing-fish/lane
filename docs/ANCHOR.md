@@ -579,3 +579,23 @@
 - `auto_segments.csv` 可用于审计与复核，`review` 样本默认不进入训练（可配置放行）。
 - 推理仍保持“给定 segment 做属性预测”的能力边界，不虚构 full-clip 端到端能力。
 - `README/config/VERSION/ANCHOR` 同步更新，版本升级为 `v0.7.0`。
+
+## 1.23) 技术路径锚点（issue26-bugfix）
+
+### 问题定义
+- review 反馈 `infer.py` 对 `auto_segments.csv` 的兼容不完整：仅识别 `sample_id/clip`，导致读取 `segment_id/clip_id` 时样本标识退化为 `unknown`。
+- `build_training_labels_from_keyframes.py` 首版仅遍历 `clip_labels.csv`，当关键帧存在但 clip 标签暂缺时会被静默忽略，影响可用性与排障。
+
+### 修复策略（固定路径）
+1. `infer.py` 的 manifest 解析补齐别名兼容：
+   - `sample_id <- sample_id | segment_id`
+   - `clip <- clip | clip_id`
+2. 自动构建脚本改为遍历 `clip_labels ∪ keyframe_labels` 的并集 clip：
+   - 缺失 `clip_label` 时，自动注入 `unknown + review + missing_clip_label` 兜底并产出审计记录。
+3. `clip_max_frame` 增加 keyframe 回退：当帧目录/索引缺失时，使用关键帧最大 `frame_idx` 估计上界，避免整 clip 被误跳过。
+4. README/VERSION/ANCHOR 同步更新，版本升级为 `v0.7.1`（bugfix）。
+
+### 验收标准
+- `infer.py --manifest data/auto_segments.csv` 可正确识别 `segment_id/clip_id`。
+- `build_training_labels_from_keyframes.py` 在 clip 标签缺失时仍能输出 `auto_segments.csv`（并以 `review` 标记）。
+- 无数据时行为保持可解释，不出现静默丢样本。

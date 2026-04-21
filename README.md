@@ -82,7 +82,7 @@ python train.py --config config.yaml
 python infer.py --config config.yaml --clip_dir ./data/frames/bag001 --start_frame 120 --end_frame 220
 ```
 
-批量（manifest / auto_segments 同 schema 兼容）：
+批量（manifest / auto_segments 同 schema 兼容，支持 `sample_id|segment_id` 与 `clip|clip_id`）：
 
 ```bash
 python infer.py --config config.yaml --manifest ./data/val_manifest.csv

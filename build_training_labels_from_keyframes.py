@@ -73,7 +73,7 @@ def load_keyframe_labels(path):
     return grouped
 
 
-def clip_max_frame(frames_root, clip_id):
+def clip_max_frame(frames_root, clip_id, keyframes=None):
     clip_dir = Path(frames_root) / clip_id
     idx_csv = clip_dir / "timestamp_index.csv"
     if idx_csv.exists():
@@ -86,7 +86,12 @@ def clip_max_frame(frames_root, clip_id):
 
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
     files = sorted([p for p in clip_dir.iterdir() if p.suffix.lower() in exts]) if clip_dir.exists() else []
-    return len(files) - 1 if files else -1
+    if files:
+        return len(files) - 1
+
+    if keyframes:
+        return max((k.get("frame_idx", -1) for k in keyframes), default=-1)
+    return -1
 
 
 def infer_segments_for_clip(clip_id, keyframes, clip_label, max_frame):
@@ -131,6 +136,8 @@ def infer_segments_for_clip(clip_id, keyframes, clip_label, max_frame):
         if clip_label["quality"] in {"review", "bad"}:
             quality = clip_label["quality"]
             reasons.append(f"clip_quality_{clip_label['quality']}")
+        if clip_label.get("notes"):
+            reasons.append(f"clip_notes:{clip_label['notes']}")
 
         segments.append({
             "clip_id": clip_id,
@@ -218,11 +225,19 @@ def main():
     keyframes = load_keyframe_labels(dcfg["keyframe_label_file"])
 
     segments = []
-    for clip_id, clip_label in clip_labels.items():
-        if clip_id not in keyframes:
+    all_clips = sorted(set(keyframes.keys()) | set(clip_labels.keys()))
+    for clip_id in all_clips:
+        clip_label = clip_labels.get(clip_id, {
+            "is_bidirectional": "unknown",
+            "lane_count": "unknown",
+            "quality": "review",
+            "notes": "missing_clip_label",
+        })
+        clip_keyframes = keyframes.get(clip_id, [])
+        if not clip_keyframes:
             continue
-        max_frame = clip_max_frame(dcfg["output_dir"], clip_id)
-        inferred = infer_segments_for_clip(clip_id, keyframes[clip_id], clip_label, max_frame)
+        max_frame = clip_max_frame(dcfg["output_dir"], clip_id, clip_keyframes)
+        inferred = infer_segments_for_clip(clip_id, clip_keyframes, clip_label, max_frame)
         for i, seg in enumerate(inferred, start=1):
             seg["segment_id"] = f"{clip_id}_auto_{i:03d}"
             seg["clip_dir"] = str(Path(dcfg["output_dir"]) / clip_id)
