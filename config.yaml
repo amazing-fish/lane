@@ -4,9 +4,10 @@ data:
   bag_dir: "./data/bags"
   output_dir: "./data/frames"
   keyframe_dir: "./data/keyframes"
-  clip_label_file: "./data/clip_labels.csv"   # 兼容保留，不再是主输入
-  segment_label_file: "./data/segment_labels.csv"
+  clip_label_file: "./data/clip_labels.csv"
   keyframe_label_file: "./data/keyframe_labels.csv"
+  auto_segment_file: "./data/auto_segments.csv"
+  segment_label_file: "./data/segment_labels.csv"  # 兼容旧流程
   train_manifest: "./data/train_manifest.csv"
   val_manifest: "./data/val_manifest.csv"
   val_ratio: 0.2

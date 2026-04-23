@@ -88,9 +88,13 @@ def split_by_clip_id(rows, val_ratio, seed):
         clip_groups[row["clip_id"]].append(row)
 
     clips = list(clip_groups.keys())
+    if len(clips) <= 1:
+        return rows[:], []
     random.Random(seed).shuffle(clips)
 
     val_clip_count = max(1, int(len(clips) * val_ratio)) if clips else 0
+    if val_clip_count >= len(clips):
+        val_clip_count = len(clips) - 1
     val_clips = set(clips[:val_clip_count])
 
     train_rows, val_rows = [], []
@@ -152,9 +156,14 @@ def main():
     else:
         all_rows = filtered[:]
         random.Random(cfg["training"].get("seed", 42)).shuffle(all_rows)
-        val_size = max(1, int(len(all_rows) * dcfg.get("val_ratio", 0.2))) if all_rows else 0
-        val_rows = all_rows[:val_size]
-        train_rows = all_rows[val_size:]
+        if len(all_rows) <= 1:
+            train_rows, val_rows = all_rows, []
+        else:
+            val_size = max(1, int(len(all_rows) * dcfg.get("val_ratio", 0.2))) if all_rows else 0
+            if val_size >= len(all_rows):
+                val_size = len(all_rows) - 1
+            val_rows = all_rows[:val_size]
+            train_rows = all_rows[val_size:]
 
     train_manifest = to_manifest_rows(train_rows)
     val_manifest = to_manifest_rows(val_rows)

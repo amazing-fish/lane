@@ -550,3 +550,94 @@
 - 修复 Attention MIL 对 padding 未屏蔽的问题，训练/验证/推理统一 `masks` 语义。
 - 增强 mask 鲁棒性（形状校验、全无效防 NaN）并保持向后兼容。
 - 移除高风险左右翻转增强，固定低风险 baseline 增强策略。
+
+## 1.22) 技术路径锚点（issue25-feature）
+
+### 问题定义
+- 现有主链路虽已是 segment 级训练，但真实标注仍依赖“关键帧标注后再手工维护 `segment_labels.csv`”。
+- 该流程导致重复劳动、边界与证据不一致、数据规模扩大后维护成本快速上升。
+
+### 修复策略（固定路径）
+1. 标注真值拆分为两层：
+   - `clip_labels.csv`：clip 级常量属性（`is_bidirectional/lane_count/quality/notes`）；
+   - `keyframe_labels.csv`：关键帧定位标签（`frame_scope`）。
+2. 重构标注工具（Tk/Web）：
+   - 进入 clip 时仅维护一次 clip 属性；
+   - 浏览关键帧时仅维护 `frame_scope`；
+   - 保存时同时输出两份 CSV。
+3. 新增 `build_training_labels_from_keyframes.py`：
+   - 输入 `clip_labels.csv + keyframe_labels.csv + timestamp_index.csv`；
+   - 输出 `auto_segments.csv + train_manifest.csv + val_manifest.csv`。
+4. 第一版区间推断采用“锚点中点切分 + review 降级”：
+   - `slope/non_slope` 作为强锚点；
+   - `unknown/transition` 不直接定边界，但触发 `quality=review`；
+   - 边界证据不足（例如触边）同样降级 `review`。
+5. 保持训练 manifest 契约不变（`sample_id/clip/clip_dir/start_frame/end_frame/frame_count/is_bidirectional/lane_count`），降低训练链路改动面。
+
+### 验收标准
+- 无需人工维护 `segment_labels.csv`，即可由关键帧标注直接生成可训练 manifest。
+- `auto_segments.csv` 可用于审计与复核，`review` 样本默认不进入训练（可配置放行）。
+- 推理仍保持“给定 segment 做属性预测”的能力边界，不虚构 full-clip 端到端能力。
+- `README/config/VERSION/ANCHOR` 同步更新，版本升级为 `v0.7.0`。
+
+## 1.23) 技术路径锚点（issue26-bugfix）
+
+### 问题定义
+- review 反馈 `infer.py` 对 `auto_segments.csv` 的兼容不完整：仅识别 `sample_id/clip`，导致读取 `segment_id/clip_id` 时样本标识退化为 `unknown`。
+- `build_training_labels_from_keyframes.py` 首版仅遍历 `clip_labels.csv`，当关键帧存在但 clip 标签暂缺时会被静默忽略，影响可用性与排障。
+
+### 修复策略（固定路径）
+1. `infer.py` 的 manifest 解析补齐别名兼容：
+   - `sample_id <- sample_id | segment_id`
+   - `clip <- clip | clip_id`
+2. 自动构建脚本改为遍历 `clip_labels ∪ keyframe_labels` 的并集 clip：
+   - 缺失 `clip_label` 时，自动注入 `unknown + review + missing_clip_label` 兜底并产出审计记录。
+3. `clip_max_frame` 增加 keyframe 回退：当帧目录/索引缺失时，使用关键帧最大 `frame_idx` 估计上界，避免整 clip 被误跳过。
+4. README/VERSION/ANCHOR 同步更新，版本升级为 `v0.7.1`（bugfix）。
+
+### 验收标准
+- `infer.py --manifest data/auto_segments.csv` 可正确识别 `segment_id/clip_id`。
+- `build_training_labels_from_keyframes.py` 在 clip 标签缺失时仍能输出 `auto_segments.csv`（并以 `review` 标记）。
+- 无数据时行为保持可解释，不出现静默丢样本。
+
+## 1.24) 技术路径锚点（issue27-bugfix）
+
+### 问题定义
+- review 继续指出两个稳定性风险：
+  1. `build_training_labels_from_keyframes.py` 在标签文件缺失时直接抛错，且同一 `frame_idx` 的重复关键帧未去重，可能导致边界推断不稳定。
+  2. `annotate_web.py` 的 `clip_labels` 保存接口未限制 clip_id 来源，存在写入非当前数据集 clip 的污染风险。
+
+### 修复策略（固定路径）
+1. 自动构建脚本增加缺失文件容错：
+   - `clip_labels/keyframe_labels` 文件不存在时返回空集合并输出 `WARN`，不中断流程。
+2. 关键帧按 `frame_idx` 去重：
+   - 同帧冲突时按 `slope > non_slope > transition > unknown` 优先级保留，保证锚点稳定。
+3. Web 标注接口增加 clip 白名单约束：
+   - 仅允许写入来自 `keyframe_dir` 实际图片推导出的 `clip_id`；
+   - 加载 `clip_labels.csv` 时同样按白名单过滤。
+4. 同步版本号到 `v0.7.2`（bugfix），并在 ANCHOR 固化路径。
+
+### 验收标准
+- 缺失标签文件时脚本输出告警但可继续运行，不出现未捕获异常。
+- 重复 `frame_idx` 的关键帧输入不会导致重复锚点和不稳定边界。
+- Web 保存不会写入当前关键帧集合之外的 `clip_id`。
+
+## 1.25) 技术路径锚点（issue28-bugfix）
+
+### 问题定义
+- review 指出两个 demo 级 P2 仍未关闭：
+  1. notes 输入框与全局热键冲突：在备注输入 `bad/unknown/2+` 等文本时会误触发 `b/n/u/1/2/3` 快捷键，污染 clip 标签。
+  2. one-clip 场景会切出空 `train_manifest`：`val` 被分到唯一 clip，`train` 为 0，导致 `train.py` 的 `DataLoader(shuffle=True)` 抛 `num_samples` 异常。
+
+### 修复策略（固定路径）
+1. 标注快捷键冲突修复（Tk + Web）：
+   - `annotate.py` 在热键回调中检测当前焦点是否输入控件，若是则忽略 `b/n/u/1/2/3`；
+   - `templates/annotate_web.html` 在 `window.keydown` 中对 `input/textarea/contentEditable` 做早退（保留 `Ctrl/Cmd+S` 保存）。
+2. 单 clip 切分兜底（新旧 manifest 入口统一）：
+   - `build_training_labels_from_keyframes.py` 与 `build_manifest.py` 的切分函数在 `len(clips)<=1` 时固定返回 `train=all, val=[]`；
+   - 随机切分分支同样保证 `val_size < len(all_rows)`，避免 train 被切空。
+3. 版本升级到 `v0.7.3`（bugfix），并同步 README/ANCHOR/VERSION。
+
+### 验收标准
+- 在 notes 输入框中键入 `b/n/u/1/2/3` 不再改变标签值。
+- one-clip 最小样本下生成 manifest 时，`train_manifest` 至少 1 条、`val_manifest` 可为空，训练链路不再因空训练集崩溃。
