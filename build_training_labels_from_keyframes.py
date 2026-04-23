@@ -37,6 +37,8 @@ def normalize_lane(v):
 
 def load_clip_labels(path):
     labels = {}
+    if not os.path.exists(path):
+        return labels
     with open(path, "r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             clip_id = str(row.get("clip_id", "")).strip()
@@ -54,6 +56,8 @@ def load_clip_labels(path):
 
 def load_keyframe_labels(path):
     grouped = defaultdict(list)
+    if not os.path.exists(path):
+        return grouped
     with open(path, "r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             clip_id = str(row.get("clip_id", "")).strip()
@@ -68,8 +72,19 @@ def load_keyframe_labels(path):
                 "frame_idx": frame_idx,
                 "frame_scope": scope if scope in VALID_SCOPE else "unknown",
             })
+    scope_priority = {"slope": 3, "non_slope": 2, "transition": 1, "unknown": 0}
     for clip_id in grouped:
         grouped[clip_id].sort(key=lambda x: x["frame_idx"])
+        deduped = {}
+        for item in grouped[clip_id]:
+            idx = item["frame_idx"]
+            if idx not in deduped:
+                deduped[idx] = item
+                continue
+            prev = deduped[idx]
+            if scope_priority[item["frame_scope"]] >= scope_priority[prev["frame_scope"]]:
+                deduped[idx] = item
+        grouped[clip_id] = [deduped[k] for k in sorted(deduped.keys())]
     return grouped
 
 
@@ -223,6 +238,10 @@ def main():
     dcfg = cfg["data"]
     clip_labels = load_clip_labels(dcfg["clip_label_file"])
     keyframes = load_keyframe_labels(dcfg["keyframe_label_file"])
+    if not clip_labels:
+        print(f"[WARN] clip labels not found or empty: {dcfg['clip_label_file']}")
+    if not keyframes:
+        print(f"[WARN] keyframe labels not found or empty: {dcfg['keyframe_label_file']}")
 
     segments = []
     all_clips = sorted(set(keyframes.keys()) | set(clip_labels.keys()))

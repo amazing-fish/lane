@@ -599,3 +599,25 @@
 - `infer.py --manifest data/auto_segments.csv` 可正确识别 `segment_id/clip_id`。
 - `build_training_labels_from_keyframes.py` 在 clip 标签缺失时仍能输出 `auto_segments.csv`（并以 `review` 标记）。
 - 无数据时行为保持可解释，不出现静默丢样本。
+
+## 1.24) 技术路径锚点（issue27-bugfix）
+
+### 问题定义
+- review 继续指出两个稳定性风险：
+  1. `build_training_labels_from_keyframes.py` 在标签文件缺失时直接抛错，且同一 `frame_idx` 的重复关键帧未去重，可能导致边界推断不稳定。
+  2. `annotate_web.py` 的 `clip_labels` 保存接口未限制 clip_id 来源，存在写入非当前数据集 clip 的污染风险。
+
+### 修复策略（固定路径）
+1. 自动构建脚本增加缺失文件容错：
+   - `clip_labels/keyframe_labels` 文件不存在时返回空集合并输出 `WARN`，不中断流程。
+2. 关键帧按 `frame_idx` 去重：
+   - 同帧冲突时按 `slope > non_slope > transition > unknown` 优先级保留，保证锚点稳定。
+3. Web 标注接口增加 clip 白名单约束：
+   - 仅允许写入来自 `keyframe_dir` 实际图片推导出的 `clip_id`；
+   - 加载 `clip_labels.csv` 时同样按白名单过滤。
+4. 同步版本号到 `v0.7.2`（bugfix），并在 ANCHOR 固化路径。
+
+### 验收标准
+- 缺失标签文件时脚本输出告警但可继续运行，不出现未捕获异常。
+- 重复 `frame_idx` 的关键帧输入不会导致重复锚点和不稳定边界。
+- Web 保存不会写入当前关键帧集合之外的 `clip_id`。

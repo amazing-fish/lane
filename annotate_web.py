@@ -73,14 +73,15 @@ def load_keyframe_labels(label_file, images):
     return labels
 
 
-def load_clip_labels(clip_label_file):
+def load_clip_labels(clip_label_file, valid_clips=None):
     labels = {}
     if not os.path.exists(clip_label_file):
         return labels
+    valid = set(valid_clips or [])
     with open(clip_label_file, "r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             clip_id = str(row.get("clip_id", "")).strip()
-            if clip_id:
+            if clip_id and (not valid or clip_id in valid):
                 labels[clip_id] = normalize_clip_label(row)
     return labels
 
@@ -120,9 +121,10 @@ def create_app(keyframe_dir, keyframe_label_file, clip_label_file):
     images = collect_images(keyframe_root)
     if not images:
         raise RuntimeError(f"在 {keyframe_root} 中未找到图片")
+    valid_clips = {extract_meta(rel)[0] for rel in images}
 
     keyframe_labels = load_keyframe_labels(keyframe_label_file, images)
-    clip_labels = load_clip_labels(clip_label_file)
+    clip_labels = load_clip_labels(clip_label_file, valid_clips)
     image_set = set(images)
 
     @app.get("/")
@@ -153,7 +155,9 @@ def create_app(keyframe_dir, keyframe_label_file, clip_label_file):
 
         if isinstance(incoming_clip, dict):
             for clip_id, val in incoming_clip.items():
-                clip_labels[str(clip_id)] = normalize_clip_label(val)
+                normalized_clip_id = str(clip_id).strip()
+                if normalized_clip_id in valid_clips:
+                    clip_labels[normalized_clip_id] = normalize_clip_label(val)
 
         save_keyframe_labels(keyframe_label_file, images, keyframe_labels)
         save_clip_labels(clip_label_file, clip_labels)
