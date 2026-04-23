@@ -621,3 +621,23 @@
 - 缺失标签文件时脚本输出告警但可继续运行，不出现未捕获异常。
 - 重复 `frame_idx` 的关键帧输入不会导致重复锚点和不稳定边界。
 - Web 保存不会写入当前关键帧集合之外的 `clip_id`。
+
+## 1.25) 技术路径锚点（issue28-bugfix）
+
+### 问题定义
+- review 指出两个 demo 级 P2 仍未关闭：
+  1. notes 输入框与全局热键冲突：在备注输入 `bad/unknown/2+` 等文本时会误触发 `b/n/u/1/2/3` 快捷键，污染 clip 标签。
+  2. one-clip 场景会切出空 `train_manifest`：`val` 被分到唯一 clip，`train` 为 0，导致 `train.py` 的 `DataLoader(shuffle=True)` 抛 `num_samples` 异常。
+
+### 修复策略（固定路径）
+1. 标注快捷键冲突修复（Tk + Web）：
+   - `annotate.py` 在热键回调中检测当前焦点是否输入控件，若是则忽略 `b/n/u/1/2/3`；
+   - `templates/annotate_web.html` 在 `window.keydown` 中对 `input/textarea/contentEditable` 做早退（保留 `Ctrl/Cmd+S` 保存）。
+2. 单 clip 切分兜底（新旧 manifest 入口统一）：
+   - `build_training_labels_from_keyframes.py` 与 `build_manifest.py` 的切分函数在 `len(clips)<=1` 时固定返回 `train=all, val=[]`；
+   - 随机切分分支同样保证 `val_size < len(all_rows)`，避免 train 被切空。
+3. 版本升级到 `v0.7.3`（bugfix），并同步 README/ANCHOR/VERSION。
+
+### 验收标准
+- 在 notes 输入框中键入 `b/n/u/1/2/3` 不再改变标签值。
+- one-clip 最小样本下生成 manifest 时，`train_manifest` 至少 1 条、`val_manifest` 可为空，训练链路不再因空训练集崩溃。

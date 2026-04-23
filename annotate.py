@@ -82,9 +82,9 @@ class AnnotationTool:
 
         tk.Label(ctrl, text="clip: notes").grid(row=4, column=0, sticky="w")
         self.notes_var = tk.StringVar(value="")
-        note_entry = tk.Entry(ctrl, textvariable=self.notes_var, width=70)
-        note_entry.grid(row=4, column=1, columnspan=5, sticky="we", padx=5)
-        note_entry.bind("<KeyRelease>", lambda _e: self._on_clip_change())
+        self.note_entry = tk.Entry(ctrl, textvariable=self.notes_var, width=70)
+        self.note_entry.grid(row=4, column=1, columnspan=5, sticky="we", padx=5)
+        self.note_entry.bind("<KeyRelease>", lambda _e: self._on_clip_change())
 
         nav = tk.Frame(root)
         nav.pack(fill=tk.X, padx=10, pady=5)
@@ -97,12 +97,12 @@ class AnnotationTool:
 
         root.bind("<Left>", lambda _e: self._prev())
         root.bind("<Right>", lambda _e: self._next())
-        root.bind("b", lambda _e: self._set_dir("yes"))
-        root.bind("n", lambda _e: self._set_dir("no"))
-        root.bind("u", lambda _e: self._set_dir("unknown"))
-        root.bind("1", lambda _e: self._set_lane("1"))
-        root.bind("2", lambda _e: self._set_lane("2"))
-        root.bind("3", lambda _e: self._set_lane("2+"))
+        root.bind("b", lambda e: self._on_hotkey_dir(e, "yes"))
+        root.bind("n", lambda e: self._on_hotkey_dir(e, "no"))
+        root.bind("u", lambda e: self._on_hotkey_dir(e, "unknown"))
+        root.bind("1", lambda e: self._on_hotkey_lane(e, "1"))
+        root.bind("2", lambda e: self._on_hotkey_lane(e, "2"))
+        root.bind("3", lambda e: self._on_hotkey_lane(e, "2+"))
         root.bind("<Control-s>", lambda _e: self._save())
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -226,6 +226,22 @@ class AnnotationTool:
         self.lane_var.set(value)
         self._on_clip_change()
         self._show_current()
+
+    def _is_text_input_focus(self, event):
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return False
+        return isinstance(widget, tk.Entry) or widget == self.note_entry
+
+    def _on_hotkey_dir(self, event, value):
+        if self._is_text_input_focus(event):
+            return
+        self._set_dir(value)
+
+    def _on_hotkey_lane(self, event, value):
+        if self._is_text_input_focus(event):
+            return
+        self._set_lane(value)
 
     def _prev(self):
         if self.idx > 0:

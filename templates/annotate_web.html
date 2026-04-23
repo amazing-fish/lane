@@ -196,6 +196,15 @@ document.querySelectorAll('input[name="scope"],input[name="dir"],input[name="lan
 
 window.addEventListener('keydown', async (e) => {
   const key = e.key.toLowerCase();
+  const target = e.target;
+  const isTypingField = target && (
+    (target.tagName === 'INPUT' && target.type !== 'radio') ||
+    target.tagName === 'TEXTAREA' ||
+    target.isContentEditable
+  );
+  if (isTypingField && !(e.ctrlKey || e.metaKey)) {
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && key === 's') { e.preventDefault(); await saveAll(); return; }
   if (key === 'arrowleft' || key === 'a') { prev(); return; }
   if (key === 'arrowright' || key === 'd') { next(); return; }
